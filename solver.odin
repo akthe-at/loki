@@ -28,18 +28,25 @@ Solver :: struct {
 	levels:    []int,
 	reasons:   []int,
 	seen:      []bool,
+	activity:  []f64,
+	var_inc:   f64,
+	conflicts: int,
+	decisions: int,
+	restarts:  int,
 }
 
 // solver_init creates a solver for f. The solver keeps a pointer to f, so f
 // must outlive it; release the solver with solver_destroy.
 solver_init :: proc(f: ^Formula) -> Solver {
 	s := Solver {
-		formula = f,
-		watches = make([][dynamic]int, 2 * f.num_vars),
-		values  = make([]LBool, f.num_vars),
-		seen    = make([]bool, f.num_vars),
-		levels  = make([]int, f.num_vars),
-		reasons = make([]int, f.num_vars),
+		formula  = f,
+		var_inc  = 1.0,
+		watches  = make([][dynamic]int, 2 * f.num_vars),
+		values   = make([]LBool, f.num_vars),
+		seen     = make([]bool, f.num_vars),
+		levels   = make([]int, f.num_vars),
+		reasons  = make([]int, f.num_vars),
+		activity = make([]f64, f.num_vars),
 	}
 	for c, i in f.clauses {
 		if len(c) >= 2 {
@@ -63,6 +70,7 @@ solver_destroy :: proc(s: ^Solver) {
 	delete(s.reasons)
 	delete(s.levels)
 	delete(s.seen)
+	delete(s.activity)
 }
 
 
@@ -173,10 +181,20 @@ backtrack :: proc(s: ^Solver, level: int) {
 // pick_unassigned returns the unassigned variable with the highest activity,
 // or false if every variable is assigned.
 pick_unassigned :: proc(s: ^Solver) -> (Var, bool) {
+	best_score := -1.0
+	best_index := -1
+
 	for v, i in s.values {
-		if v == .Undef {
-			return Var(i), true
+		if v != .Undef {
+			continue
 		}
+		if s.activity[i] > best_score {
+			best_score = s.activity[i]
+			best_index = i
+		}
+	}
+	if best_index != -1 {
+		return Var(best_index), true
 	}
 	return Var(0), false
 }
@@ -203,15 +221,26 @@ solve :: proc(s: ^Solver) -> Result {
 		}
 	}
 
+	restart_limit := 100
+	conflicts_since_restart := 0
+
 	for {
 		confl := propagate(s)
 
 		switch confl {
 		case NO_REASON:
+			if conflicts_since_restart >= restart_limit {
+				backtrack(s, 0)
+				conflicts_since_restart = 0
+				restart_limit = restart_limit * 3 / 2
+				s.restarts += 1
+				continue
+			}
 			v, ok := pick_unassigned(s)
 			if !ok {
 				return .Sat
 			}
+			s.decisions += 1
 			new_decision_level(s)
 			assign(s, lit_pos(v), NO_REASON)
 		case:
@@ -219,6 +248,9 @@ solve :: proc(s: ^Solver) -> Result {
 				return .Unsat
 			}
 			learnt, bj_level := analyze(s, confl)
+			s.var_inc /= 0.95
+			s.conflicts += 1
+			conflicts_since_restart += 1
 			backtrack(s, bj_level)
 			if len(learnt) == 1 {
 				assign(s, learnt[0], NO_REASON)
@@ -254,27 +286,32 @@ solve :: proc(s: ^Solver) -> Result {
 //
 // The caller owns the returned dynamic array.
 analyze :: proc(s: ^Solver, confl: int) -> (learnt: [dynamic]Literal, bj_level: int) {
-	append(&learnt, Literal(0)) // reserves slot 0
+	append(&learnt, Literal(0)) // reserves slot 0 for the negated UIP
 
-	counter := 0
+	counter := 0 // seen literals at the current level still to resolve
 	p: Literal
 	p_set := false
 	idx := len(s.trail) - 1
-	confl := confl
+	confl := confl // mutable copy of the parameter
 	current := decision_level(s)
 
 	// each time around the loop, look at one clause.
 	// first the conflict clause, then the reason clauses.
 	for {
 		c := s.formula.clauses[confl]
+		// skip c[0] once resolving reasons: it is p itself, the literal this
+		// clause propagated. the conflict clause asserts nothing, so the
+		// first pass scans every literal.
 		start := 1 if p_set else 0
 
 		for k in start ..< len(c) {
 			q := c[k]
 			v := lit_var(q)
 
+			// ignore duplicates and level-0 facts (permanent assignments)
 			if !s.seen[v] && s.levels[v] > 0 {
 				s.seen[v] = true
+				bump(s, v)
 				if s.levels[v] == current {
 					counter += 1
 				} else {
@@ -283,6 +320,7 @@ analyze :: proc(s: ^Solver, confl: int) -> (learnt: [dynamic]Literal, bj_level: 
 			}
 		}
 
+		// reverse trail order is reverse implication order
 		for !s.seen[lit_var(s.trail[idx])] {
 			idx -= 1
 		}
@@ -298,6 +336,8 @@ analyze :: proc(s: ^Solver, confl: int) -> (learnt: [dynamic]Literal, bj_level: 
 		confl = s.reasons[lit_var(p)] // next time expand p's reason
 	}
 
+	// after backjumping, all other learnt literals are still false, so the
+	// clause propagates lit_neg(p)
 	learnt[0] = lit_neg(p)
 
 	// backjump level = highest level among learnt[1:], move that literal into slot 1
