@@ -4,6 +4,8 @@ Howdy, I bet you're wondering how you got here and what this is? Honestly, I am 
 
 My long-term (very long-term) dream is a CP-SAT style constraint solver written in plain Odin. My first step/goal was just getting a real CDCL SAT solver working, which is about the state we are in now.
 
+> **heads up:** this is a learning project and not production ready...yet...don't trust it with anything important yet.
+
 ## where it's at
 
 it's all one `main.odin` file at the moment. it reads a DIMACS `.cnf` file and tells you SAT or UNSAT. it works! it's just not organized yet.
@@ -21,11 +23,18 @@ stuff I've built so far, roughly in order:
 
 ## what I'm working on / towards
 
-- **next up:** VSIDS (smarter choice of which variable to guess) and restarts. right now it always guesses the first unassigned variable.
-- splitting this into a proper Odin library package, with a small CLI and real tests instead of me eyeballing printouts
-- cleaning out old learned clauses so memory doesn't grow forever
-- phase saving
-- then the CP side: "exactly k of these" constraints, optimization (best answer, not just any answer), integer variables with lazy clause generation
+- **next up:** 
+    - [x] VSIDS and restarts.
+    - [ ] cleaning out old learned clauses so memory doesn't grow forever
+    - [ ] phase saving
+    - [ ] luby restarts
+    - [ ] then the CP side: "exactly k of these" constraints, optimization (best answer, not just any answer), integer variables with lazy clause generation
 
 I've got a couple real-world use cases for this at work and in personal projects that I want an alternative to CP-SAT to use with.
+
+Currently, in my head...the plan is for this to be a general library other people can use too, not just from Odin: eventually from Python, R, Go (no cgo), and maybe others but I know I would use it from those languages at least.
+
+## license
+
+zlib licensed, see [LICENSE](LICENSE).
 
