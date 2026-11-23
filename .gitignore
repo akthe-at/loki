@@ -3,3 +3,4 @@ bench/
 *.exe
 *.pdb
 *.cnf
+build/
