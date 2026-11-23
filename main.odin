@@ -42,38 +42,6 @@ Solver :: struct {
 	seen:      []bool,
 }
 
-main :: proc() {
-	f, ok := parse_dimacs("./bench/uf50-218/uf50-0131.cnf")
-	if !ok {
-		fmt.println("Failed to parse DIMACS file")
-		return
-	}
-	fmt.println(f)
-	defer formula_destroy(&f)
-
-	s := solver_init(&f)
-	defer solver_destroy(&s)
-	fmt.println(s.watches)
-
-
-	the_result := solve(&s)
-	if the_result == .Sat {
-		fmt.println("The result: ", the_result)
-	}
-
-	other_test := make([]bool, f.num_vars)
-	defer delete(other_test)
-	for v, i in s.values {
-		if v == .True {
-			other_test[i] = true
-		} else {
-			other_test[i] = false
-		}
-	}
-
-	fmt.println(formula_satisfied(f, other_test))
-
-}
 
 lit_from_dimacs :: proc(x: int) -> Literal {
 	// switch to 0-based indexing and encode the sign in the least significant bit
