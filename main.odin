@@ -1,10 +1,5 @@
 package loki
 
-import "core:fmt"
-import "core:os"
-import "core:strconv"
-import "core:strings"
-
 
 Var :: distinct u32
 Literal :: distinct u32
@@ -23,11 +18,6 @@ Result :: enum {
 	Unsat,
 }
 
-// Formula represents a CNF formula with a number of variables and a list of clauses.
-Formula :: struct {
-	num_vars: u32,
-	clauses:  [dynamic]Clause,
-}
 
 // Solver represents a SAT solver that operates on a given formula, maintains variable assignments, and tracks the trail of decisions made during the solving process.
 Solver :: struct {
@@ -81,81 +71,6 @@ clause_satisfied :: proc(c: Clause, assignment: []bool) -> bool {
 	return false
 }
 
-formula_satisfied :: proc(f: Formula, assignment: []bool) -> bool {
-	for c in f.clauses {
-		if !clause_satisfied(c, assignment) {
-			return false
-		}
-	}
-	return true
-}
-
-formula_destroy :: proc(f: ^Formula) {
-	for c in f.clauses {
-		delete(c)
-	}
-	delete(f.clauses)
-}
-
-parse_dimacs :: proc(path: string) -> (f: Formula, ok: bool) {
-	// Read the file. If it fails, return {}, false.
-	data, err := os.read_entire_file(path, context.allocator)
-	if err != nil {
-		fmt.println("Error reading file:", err)
-		return {}, false
-	}
-	defer delete(data)
-
-	text := string(data)
-	rest := text
-	current: [dynamic]Literal
-	defer delete(current)
-	defer if !ok {formula_destroy(&f)}
-	//      - For each line:
-	//        - empty or starts with c: skip it (continue)
-	for line in strings.split_lines_iterator(&rest) {
-		if len(line) == 0 || strings.starts_with(line, "c") {
-			// skip header
-			continue
-		}
-
-		if strings.starts_with(line, "%") {
-			break
-		}
-		// Parse the third word into f.num_vars.
-		//- starts with p: the words are p, cnf, 3, 2.
-		//	You'll need a conversion, since parse_int gives an int
-		//  and the field is u32.
-		if strings.starts_with(line, "p") {
-			// parse the third word into f.num_vars
-			header := line
-			count := 0
-			for w in strings.fields_iterator(&header) {
-				count += 1
-				if count == 3 {
-					n, ok := strconv.parse_int(w)
-					if !ok {return f, false}
-					f.num_vars = u32(n)
-					break
-				}
-			}
-			continue
-		}
-		words := line
-		for word in strings.fields_iterator(&words) {
-			lit, ok := strconv.parse_int(word)
-			if !ok {return f, false}
-			if lit == 0 {
-				// finish the current clause
-				append(&f.clauses, current[:])
-				current = {}
-			} else {
-				append(&current, lit_from_dimacs(lit))
-			}
-		}
-	}
-	return f, true
-}
 
 solver_init :: proc(f: ^Formula) -> Solver {
 	s := Solver {
