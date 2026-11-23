@@ -1,6 +1,7 @@
 package loki
 
 
+// NO_REASON is the sentinel for "no clause": no implying reason or no conflict.
 NO_REASON :: -1
 
 // The Lifted Boolean type is used to represent a boolean value that can also be undefined.
@@ -29,6 +30,8 @@ Solver :: struct {
 	seen:      []bool,
 }
 
+// solver_init creates a solver for f. The solver keeps a pointer to f, so f
+// must outlive it; release the solver with solver_destroy.
 solver_init :: proc(f: ^Formula) -> Solver {
 	s := Solver {
 		formula = f,
@@ -47,6 +50,7 @@ solver_init :: proc(f: ^Formula) -> Solver {
 	return s
 }
 
+// solver_destroy frees the solver's internal state. It does not free the formula.
 solver_destroy :: proc(s: ^Solver) {
 	delete(s.values)
 	delete(s.trail)
@@ -62,6 +66,8 @@ solver_destroy :: proc(s: ^Solver) {
 }
 
 
+// clause_satisfied reports whether any literal in c is true under assignment,
+// which is indexed by variable.
 clause_satisfied :: proc(c: Clause, assignment: []bool) -> bool {
 	for v in c {
 		if lit_is_true(v, assignment) {
@@ -72,6 +78,8 @@ clause_satisfied :: proc(c: Clause, assignment: []bool) -> bool {
 }
 
 
+// assign makes l true at the current decision level and records why: a clause
+// index in reason, or NO_REASON for decisions and root units.
 assign :: proc(s: ^Solver, l: Literal, reason: int) {
 	v := lit_var(l)
 	s.reasons[v] = reason
@@ -84,6 +92,8 @@ assign :: proc(s: ^Solver, l: Literal, reason: int) {
 	append(&s.trail, l)
 }
 
+// propagate performs unit propagation on the trail. It returns the index of a
+// conflicting clause, or NO_REASON if none was found.
 propagate :: proc(s: ^Solver) -> int {
 	for s.qhead < len(s.trail) {
 		p := s.trail[s.qhead]
@@ -132,19 +142,21 @@ propagate :: proc(s: ^Solver) -> int {
 	return NO_REASON
 }
 
-// decision_level tells us the current decision level
+// decision_level returns the number of active decisions; 0 is the root level.
 decision_level :: proc(s: ^Solver) -> int {
 	return len(s.trail_lim)
 }
 
-// appends current trail length to trail_lim, this sets the new decision level.
-// You must call it before assigning the decision literal.
+// new_decision_level starts a new decision level at the current trail length.
+// It must be called before assigning the decision literal.
 new_decision_level :: proc(s: ^Solver) {
 	current_trail_len := len(s.trail)
 	append(&s.trail_lim, current_trail_len)
 }
 
 
+// backtrack returns the solver to the given decision level, unassigning
+// everything above it.
 backtrack :: proc(s: ^Solver, level: int) {
 	if level >= decision_level(s) {
 		return
@@ -158,6 +170,8 @@ backtrack :: proc(s: ^Solver, level: int) {
 	s.qhead = target_trail_length
 }
 
+// pick_unassigned returns the unassigned variable with the highest activity,
+// or false if every variable is assigned.
 pick_unassigned :: proc(s: ^Solver) -> (Var, bool) {
 	for v, i in s.values {
 		if v == .Undef {
@@ -168,6 +182,9 @@ pick_unassigned :: proc(s: ^Solver) -> (Var, bool) {
 }
 
 
+// solve runs conflict-driven clause learning. On .Sat, the satisfying
+// assignment is in s.values. Non-unit learned clauses are appended to
+// s.formula.clauses.
 solve :: proc(s: ^Solver) -> Result {
 	for c in s.formula.clauses {
 		switch len(c) {
@@ -218,6 +235,24 @@ solve :: proc(s: ^Solver) -> Result {
 	return .Unsat
 }
 
+// analyze performs conflict analysis on the conflict clause `confl` using the
+// first Unique Implication Point (1UIP) scheme. It walks the implication graph
+// backwards from the conflict, resolving the reason clauses of trail literals
+// until only one literal from the current decision level remains (the UIP).
+//
+// Returns the learnt clause and the level to backjump to:
+//   learnt   - slot 0 holds the negated UIP literal, which the clause asserts
+//              after backjumping; slots 1.. hold falsified literals from
+//              earlier decision levels, with the highest-level one swapped
+//              into slot 1 so the two watched literals are the asserting one
+//              and the latest-level one.
+//   bj_level - highest decision level among learnt[1:], or 0 for a unit clause.
+//
+// As a side effect, bump (VSIDS) is applied to every newly seen literal above
+// decision level 0, so variables involved in recent conflicts are preferred by
+// pick_unassigned.
+//
+// The caller owns the returned dynamic array.
 analyze :: proc(s: ^Solver, confl: int) -> (learnt: [dynamic]Literal, bj_level: int) {
 	append(&learnt, Literal(0)) // reserves slot 0
 
@@ -285,4 +320,17 @@ analyze :: proc(s: ^Solver, confl: int) -> (learnt: [dynamic]Literal, bj_level: 
 	}
 
 	return learnt, bj_level
+}
+
+// bump adds var_inc to activity[v]; if the result exceeds 1e100, it rescales
+// all activities and var_inc by 1e-100 to avoid overflow.
+bump :: proc(s: ^Solver, v: Var) {
+	s.activity[v] += s.var_inc
+	if s.activity[v] > 1e100 {
+		// rescale activity and var_inc by 1e-100
+		for &a in s.activity {
+			a *= 1e-100
+		}
+		s.var_inc *= 1e-100
+	}
 }

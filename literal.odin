@@ -5,8 +5,9 @@ Var :: distinct u32
 Literal :: distinct u32
 Clause :: []Literal
 
+// lit_from_dimacs converts a signed 1-based DIMACS literal to the internal
+// encoding: zero-based variable with the sign in the least significant bit.
 lit_from_dimacs :: proc(x: int) -> Literal {
-	// switch to 0-based indexing and encode the sign in the least significant bit
 	v := abs(x) - 1
 	if x < 0 {
 		return Literal(2 * v + 1)
@@ -34,6 +35,7 @@ lit_is_true :: proc(l: Literal, assignment: []bool) -> bool {
 	return value != negated
 }
 
+// lit_value returns the value of l under s's current assignment, or .Undef.
 lit_value :: proc(s: ^Solver, l: Literal) -> LBool {
 	v := lit_var(l)
 	value := s.values[v]

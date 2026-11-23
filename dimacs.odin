@@ -5,6 +5,8 @@ import "core:os"
 import "core:strconv"
 import "core:strings"
 
+// parse_dimacs reads a DIMACS CNF file. On success the caller owns the returned
+// formula and must free it with formula_destroy.
 parse_dimacs :: proc(path: string) -> (f: Formula, ok: bool) {
 	// Read the file. If it fails, return {}, false.
 	data, err := os.read_entire_file(path, context.allocator)

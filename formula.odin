@@ -7,6 +7,7 @@ Formula :: struct {
 	clauses:  [dynamic]Clause,
 }
 
+// formula_satisfied reports whether every clause in f is true under assignment.
 formula_satisfied :: proc(f: Formula, assignment: []bool) -> bool {
 	for c in f.clauses {
 		if !clause_satisfied(c, assignment) {
@@ -16,6 +17,7 @@ formula_satisfied :: proc(f: Formula, assignment: []bool) -> bool {
 	return true
 }
 
+// formula_destroy frees the formula's clauses.
 formula_destroy :: proc(f: ^Formula) {
 	for c in f.clauses {
 		delete(c)
