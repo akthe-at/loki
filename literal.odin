@@ -1,0 +1,56 @@
+package loki
+
+
+Var :: distinct u32
+Literal :: distinct u32
+Clause :: []Literal
+
+lit_from_dimacs :: proc(x: int) -> Literal {
+	// switch to 0-based indexing and encode the sign in the least significant bit
+	v := abs(x) - 1
+	if x < 0 {
+		return Literal(2 * v + 1)
+	} else {
+		return Literal(2 * v)
+	}
+}
+
+lit_var :: proc(l: Literal) -> Var {
+	result := l / 2
+	return Var(result)
+}
+
+lit_pos :: proc(v: Var) -> Literal {
+	return Literal(2 * v)
+}
+
+lit_neg :: proc(l: Literal) -> Literal {
+	return l ~ 1
+}
+
+lit_is_true :: proc(l: Literal, assignment: []bool) -> bool {
+	value := assignment[lit_var(l)]
+	negated := l % 2 == 1
+	return value != negated
+}
+
+lit_value :: proc(s: ^Solver, l: Literal) -> LBool {
+	v := lit_var(l)
+	value := s.values[v]
+	if value == .Undef {
+		return .Undef
+	}
+	if lit_is_neg(l) {
+		if value == .True {
+			return .False
+		} else {
+			return .True
+		}
+	} else {
+		return value
+	}
+}
+
+lit_is_neg :: proc(l: Literal) -> bool {
+	return l % 2 == 1
+}
