@@ -66,9 +66,29 @@ main :: proc() {
 		fmt.println("check:    ", "ok" if check_ok else "FAILED")
 	}
 
+	learned := len(f.clauses) - n_original
 	fmt.printf("time:      %.2f ms\n", time.duration_milliseconds(elapsed))
 	fmt.println("conflicts:", s.conflicts)
 	fmt.println("decisions:", s.decisions)
 	fmt.println("restarts: ", s.restarts)
-	fmt.println("learned:  ", len(f.clauses) - n_original)
+	fmt.println("learned:  ", learned)
+	fmt.println("deleted:", s.deleted)
+	fmt.println("alive:", learned - s.deleted)
+	fmt.println("reductions:", s.reductions)
+
+	// Clause quality: average LBD and glue count (LBD <= 2) over learned clauses.
+	n_learned, lbd_sum, glue := 0, 0, 0
+	for info in s.infos {
+		if !info.learned {
+			continue
+		}
+		n_learned += 1
+		lbd_sum += info.lbd
+		if info.lbd <= 2 {
+			glue += 1
+		}
+	}
+	avg_lbd := f64(lbd_sum) / f64(n_learned) if n_learned > 0 else 0
+	fmt.printf("avg lbd:   %.2f\n", avg_lbd)
+	fmt.println("glue:     ", glue)
 }

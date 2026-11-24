@@ -1,5 +1,6 @@
 package loki
 
+import "core:slice"
 
 // NO_REASON is the sentinel for "no clause": no implying reason or no conflict.
 NO_REASON :: -1
@@ -16,44 +17,66 @@ Result :: enum {
 	Unsat,
 }
 
+Clause_Info :: struct {
+	learned: bool,
+	lbd:     int,
+	deleted: bool,
+}
+
+Victim_Candidate :: struct {
+	ci:  int,
+	lbd: int,
+}
+
 
 // Solver represents a SAT solver that operates on a given formula, maintains variable assignments, and tracks the trail of decisions made during the solving process.
 Solver :: struct {
-	formula:   ^Formula,
-	values:    []LBool,
-	trail:     [dynamic]Literal,
-	trail_lim: [dynamic]int,
-	watches:   [][dynamic]int,
-	qhead:     int,
-	levels:    []int,
-	reasons:   []int,
-	seen:      []bool,
-	activity:  []f64,
-	var_inc:   f64,
-	conflicts: int,
-	decisions: int,
-	restarts:  int,
+	formula:      ^Formula,
+	values:       []LBool,
+	trail:        [dynamic]Literal,
+	trail_lim:    [dynamic]int,
+	infos:        [dynamic]Clause_Info,
+	watches:      [][dynamic]int,
+	qhead:        int,
+	levels:       []int,
+	reasons:      []int,
+	seen:         []bool,
+	level_seen:   []bool,
+	activity:     []f64,
+	var_inc:      f64,
+	conflicts:    int,
+	decisions:    int,
+	restarts:     int,
+	deleted:      int,
+	reduce_first: int,
+	reduce_inc:   int,
+	reductions:   int,
 }
 
 // solver_init creates a solver for f. The solver keeps a pointer to f, so f
 // must outlive it; release the solver with solver_destroy.
 solver_init :: proc(f: ^Formula) -> Solver {
 	s := Solver {
-		formula  = f,
-		var_inc  = 1.0,
-		watches  = make([][dynamic]int, 2 * f.num_vars),
-		values   = make([]LBool, f.num_vars),
-		seen     = make([]bool, f.num_vars),
-		levels   = make([]int, f.num_vars),
-		reasons  = make([]int, f.num_vars),
-		activity = make([]f64, f.num_vars),
+		formula      = f,
+		var_inc      = 1.0,
+		reduce_first = 2000,
+		reduce_inc   = 300,
+		watches      = make([][dynamic]int, 2 * f.num_vars),
+		values       = make([]LBool, f.num_vars),
+		seen         = make([]bool, f.num_vars),
+		level_seen   = make([]bool, f.num_vars + 1),
+		levels       = make([]int, f.num_vars),
+		reasons      = make([]int, f.num_vars),
+		activity     = make([]f64, f.num_vars),
 	}
 	for c, i in f.clauses {
+		append(&s.infos, Clause_Info{})
 		if len(c) >= 2 {
 			append(&s.watches[c[0]], i)
 			append(&s.watches[c[1]], i)
 		}
 	}
+	assert(len(s.infos) == len(s.formula.clauses))
 	return s
 }
 
@@ -69,8 +92,10 @@ solver_destroy :: proc(s: ^Solver) {
 	delete(s.watches)
 	delete(s.reasons)
 	delete(s.levels)
+	delete(s.level_seen)
 	delete(s.seen)
 	delete(s.activity)
+	delete(s.infos)
 }
 
 
@@ -112,6 +137,7 @@ propagate :: proc(s: ^Solver) -> int {
 		i := 0
 		for i < len(ws) {
 			ci := ws[i]
+			assert(!s.infos[ci].deleted)
 			c := s.formula.clauses[ci]
 
 			// Normalise: Make sure false_lit is in c[1]
@@ -222,6 +248,8 @@ solve :: proc(s: ^Solver) -> Result {
 	}
 
 	restart_limit := 100
+	interval := s.reduce_first
+	next_reduce := s.reduce_first
 	conflicts_since_restart := 0
 
 	for {
@@ -229,6 +257,11 @@ solve :: proc(s: ^Solver) -> Result {
 
 		switch confl {
 		case NO_REASON:
+			if s.conflicts >= next_reduce {
+				reduce_db(s)
+				interval += s.reduce_inc
+				next_reduce += interval
+			}
 			if conflicts_since_restart >= restart_limit {
 				backtrack(s, 0)
 				conflicts_since_restart = 0
@@ -251,6 +284,7 @@ solve :: proc(s: ^Solver) -> Result {
 			s.var_inc /= 0.95
 			s.conflicts += 1
 			conflicts_since_restart += 1
+			lbd := compute_lbd(s, learnt[:])
 			backtrack(s, bj_level)
 			if len(learnt) == 1 {
 				assign(s, learnt[0], NO_REASON)
@@ -258,6 +292,8 @@ solve :: proc(s: ^Solver) -> Result {
 			} else {
 				append(&s.formula.clauses, learnt[:])
 				ci := len(s.formula.clauses) - 1
+				append(&s.infos, Clause_Info{learned = true, lbd = lbd})
+				assert(len(s.infos) == len(s.formula.clauses))
 				append(&s.watches[learnt[0]], ci)
 				append(&s.watches[learnt[1]], ci)
 				assign(s, learnt[0], ci)
@@ -373,4 +409,109 @@ bump :: proc(s: ^Solver, v: Var) {
 		}
 		s.var_inc *= 1e-100
 	}
+}
+
+// compute_lbd returns the number or distinct decision levels among lits.
+compute_lbd :: proc(s: ^Solver, lits: []Literal) -> int {
+	lbd := 0
+	for l in lits {
+		v := lit_var(l)
+		lvl := s.levels[v]
+
+		if !s.level_seen[lvl] {
+			s.level_seen[lvl] = true
+			lbd += 1
+		}
+	}
+
+	for l in lits {
+		v := lit_var(l)
+		lvl := s.levels[v]
+		s.level_seen[lvl] = false
+	}
+	assert(1 <= lbd && lbd <= len(lits))
+
+	return lbd
+}
+
+locked :: proc(s: ^Solver, ci: int) -> bool {
+	c := s.formula.clauses[ci]
+
+	return lit_value(s, c[0]) == .True && s.reasons[lit_var(c[0])] == ci
+}
+
+// Victim rules: a clause can be deleted only if it's learned, has LBD > 2 (glue clauses are kept),
+// and is not locked.
+// Among those, sort by LBD, highest first, and pick the first half.
+//  - Locked clauses: a clause is locked while it's the reason for a literal that's currently assigned.
+//    Deleting it would leave analyze following reasons[v] to a clause that no longer exists.
+//  - Fast locked test: in your code, a clause only ever assigns its slot-0 literal, so the test is "c[0] is
+//    true now and reasons[var] == ci". You need both halves because backtrack leaves old reasons entries
+//    behind, the same way it leaves levels behind, which ties back to the decision_level() vs s.levels[v]
+//    mix-up from earlier.
+collect_victims :: proc(s: ^Solver) -> [dynamic]int {
+	candidates: [dynamic]Victim_Candidate
+	defer delete(candidates)
+
+	result: [dynamic]int
+
+	for info, ci in s.infos {
+		// every clause index that is learned, has LBD > 2, and is not locked, each paired with its LBD
+		// if it passes all 3 tests, append a pair.
+		if info.learned && info.lbd > 2 && !info.deleted && !locked(s, ci) {
+			append(&candidates, Victim_Candidate{ci = ci, lbd = info.lbd})
+		}
+	}
+
+	// sort it worst-first (highest LBD first)
+	slice.sort_by(candidates[:], proc(a, b: Victim_Candidate) -> bool {
+		return a.lbd > b.lbd
+	})
+
+	// declare victims
+	// loop over first half of candidates: append each one's ci to victims
+	for k in 0 ..< len(candidates) / 2 {
+		append(&result, candidates[k].ci)
+		assert(
+			s.infos[candidates[k].ci].learned &&
+			!s.infos[candidates[k].ci].deleted &&
+			s.infos[candidates[k].ci].lbd > 2 &&
+			!locked(s, candidates[k].ci),
+		)
+	}
+
+
+	// return the clause indices of the first half. The caller owns the returned array, and the temporary list is freed inside the proc.
+	return result
+}
+
+reduce_db :: proc(s: ^Solver) {
+	// Mark. Set s.infos[ci].deleted = true for every victim.
+	// Clean the watch lists. Walk every watch list and drop the entries whose clause is marked deleted.
+	// Free. delete each victim's literals, and set its slot to nil.
+	// Count. s.deleted += len(victims).
+	victims := collect_victims(s)
+	defer delete(victims)
+	for ci in victims {
+		s.infos[ci].deleted = true
+	}
+
+	for &ws in s.watches {
+		j := 0
+		for ci in ws {
+
+			if !s.infos[ci].deleted {
+				ws[j] = ci
+				j += 1
+			}
+		}
+		resize(&ws, j)
+	}
+
+	for ci in victims {
+		delete(s.formula.clauses[ci])
+		s.formula.clauses[ci] = nil
+	}
+	s.deleted += len(victims)
+	s.reductions += 1
 }
