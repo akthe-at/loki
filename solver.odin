@@ -17,6 +17,11 @@ Result :: enum {
 	Unsat,
 }
 
+Restart_Schedule :: enum {
+	Geometric,
+	Luby,
+}
+
 Clause_Info :: struct {
 	learned: bool,
 	lbd:     int,
@@ -31,43 +36,51 @@ Victim_Candidate :: struct {
 
 // Solver represents a SAT solver that operates on a given formula, maintains variable assignments, and tracks the trail of decisions made during the solving process.
 Solver :: struct {
-	formula:      ^Formula,
-	values:       []LBool,
-	trail:        [dynamic]Literal,
-	trail_lim:    [dynamic]int,
-	infos:        [dynamic]Clause_Info,
-	watches:      [][dynamic]int,
-	qhead:        int,
-	levels:       []int,
-	reasons:      []int,
-	seen:         []bool,
-	level_seen:   []bool,
-	activity:     []f64,
-	var_inc:      f64,
-	conflicts:    int,
-	decisions:    int,
-	restarts:     int,
-	deleted:      int,
-	reduce_first: int,
-	reduce_inc:   int,
-	reductions:   int,
+	formula:          ^Formula,
+	values:           []LBool,
+	trail:            [dynamic]Literal,
+	trail_lim:        [dynamic]int,
+	infos:            [dynamic]Clause_Info,
+	watches:          [][dynamic]int,
+	qhead:            int,
+	levels:           []int,
+	reasons:          []int,
+	seen:             []bool,
+	level_seen:       []bool,
+	polarity:         []bool,
+	activity:         []f64,
+	phase_saving:     bool,
+	var_inc:          f64,
+	conflicts:        int,
+	decisions:        int,
+	restarts:         int,
+	deleted:          int,
+	reduce_first:     int,
+	reduce_inc:       int,
+	reductions:       int,
+	restart_schedule: Restart_Schedule,
+	restart_unit:     int,
 }
 
 // solver_init creates a solver for f. The solver keeps a pointer to f, so f
 // must outlive it; release the solver with solver_destroy.
 solver_init :: proc(f: ^Formula) -> Solver {
 	s := Solver {
-		formula      = f,
-		var_inc      = 1.0,
-		reduce_first = 2000,
-		reduce_inc   = 300,
-		watches      = make([][dynamic]int, 2 * f.num_vars),
-		values       = make([]LBool, f.num_vars),
-		seen         = make([]bool, f.num_vars),
-		level_seen   = make([]bool, f.num_vars + 1),
-		levels       = make([]int, f.num_vars),
-		reasons      = make([]int, f.num_vars),
-		activity     = make([]f64, f.num_vars),
+		formula          = f,
+		var_inc          = 1.0,
+		reduce_first     = 2000,
+		reduce_inc       = 300,
+		restart_schedule = .Geometric,
+		restart_unit     = 100,
+		phase_saving     = true,
+		watches          = make([][dynamic]int, 2 * f.num_vars),
+		values           = make([]LBool, f.num_vars),
+		seen             = make([]bool, f.num_vars),
+		level_seen       = make([]bool, f.num_vars + 1),
+		levels           = make([]int, f.num_vars),
+		reasons          = make([]int, f.num_vars),
+		activity         = make([]f64, f.num_vars),
+		polarity         = make([]bool, f.num_vars),
 	}
 	for c, i in f.clauses {
 		append(&s.infos, Clause_Info{})
@@ -75,6 +88,9 @@ solver_init :: proc(f: ^Formula) -> Solver {
 			append(&s.watches[c[0]], i)
 			append(&s.watches[c[1]], i)
 		}
+	}
+	for &v in s.polarity {
+		v = true
 	}
 	assert(len(s.infos) == len(s.formula.clauses))
 	return s
@@ -96,6 +112,7 @@ solver_destroy :: proc(s: ^Solver) {
 	delete(s.seen)
 	delete(s.activity)
 	delete(s.infos)
+	delete(s.polarity)
 }
 
 
@@ -198,6 +215,9 @@ backtrack :: proc(s: ^Solver, level: int) {
 	target_trail_length := s.trail_lim[level]
 	for len(s.trail) > target_trail_length {
 		l := pop(&s.trail)
+		if s.phase_saving {
+			s.polarity[lit_var(l)] = !lit_is_neg(l)
+		}
 		s.values[lit_var(l)] = .Undef
 	}
 	resize(&s.trail_lim, level)
@@ -247,7 +267,7 @@ solve :: proc(s: ^Solver) -> Result {
 		}
 	}
 
-	restart_limit := 100
+	restart_limit := s.restart_unit
 	interval := s.reduce_first
 	next_reduce := s.reduce_first
 	conflicts_since_restart := 0
@@ -265,8 +285,13 @@ solve :: proc(s: ^Solver) -> Result {
 			if conflicts_since_restart >= restart_limit {
 				backtrack(s, 0)
 				conflicts_since_restart = 0
-				restart_limit = restart_limit * 3 / 2
 				s.restarts += 1
+				switch s.restart_schedule {
+				case .Geometric:
+					restart_limit = restart_limit * 3 / 2
+				case .Luby:
+					restart_limit = s.restart_unit * luby(s.restarts + 1)
+				}
 				continue
 			}
 			v, ok := pick_unassigned(s)
@@ -275,7 +300,13 @@ solve :: proc(s: ^Solver) -> Result {
 			}
 			s.decisions += 1
 			new_decision_level(s)
-			assign(s, lit_pos(v), NO_REASON)
+			decision: Literal
+			if s.polarity[v] {
+				decision = lit_pos(v)
+			} else {
+				decision = lit_neg(lit_pos(v))
+			}
+			assign(s, decision, NO_REASON)
 		case:
 			if decision_level(s) == 0 {
 				return .Unsat
@@ -514,4 +545,20 @@ reduce_db :: proc(s: ^Solver) {
 	}
 	s.deleted += len(victims)
 	s.reductions += 1
+}
+
+luby :: proc(i: int) -> int {
+	assert(i >= 1)
+	n := i
+	for {
+		size := 1
+
+		for size < n {
+			size = 2 * size + 1
+		}
+		if n == size {
+			return (size + 1) / 2
+		}
+		n -= (size - 1) / 2
+	}
 }

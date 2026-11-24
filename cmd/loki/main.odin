@@ -42,6 +42,24 @@ main :: proc() {
 	s := loki.solver_init(&f)
 	defer loki.solver_destroy(&s)
 
+	// Settings from the environment (CLI only; the library takes struct fields).
+	// LOKI_PHASE_SAVING=0 turns phase saving off.
+	if value, found := os.lookup_env("LOKI_PHASE_SAVING", context.temp_allocator);
+	   found && value == "0" {
+		s.phase_saving = false
+	}
+	fmt.println("phase saving:", "on" if s.phase_saving else "off")
+	// LOKI_RESTARTS
+	if value, found := os.lookup_env("LOKI_RESTARTS", context.temp_allocator);
+	   found && value == "luby" {
+		s.restart_schedule = .Luby
+	}
+	if value, found := os.lookup_env("LOKI_RESTARTS", context.temp_allocator);
+	   found && value == "geometric" {
+		s.restart_schedule = .Geometric
+	}
+	fmt.println("restart schedule:", s.restart_schedule)
+
 	start := time.now()
 	result := loki.solve(&s)
 	elapsed := time.since(start)
