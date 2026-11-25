@@ -20,17 +20,20 @@ what's in it, roughly in the order I built it:
 - restarts (geometric by default, Luby is there too) and phase saving
 - learned clause cleanup using LBD
 - blocking literals in the watch lists, plus a fast path for binary clauses
+- learned clause minimization (MiniSat-style recursive, from [Sörensson & Biere 2009](https://fmv.jku.at/papers/SoerenssonBiere-SAT09.pdf)): drops literals the rest of the clause already implies, which cuts about 20–40% of learned literals
 - tests: unit tests for the internals, plus whole solves against the benchmark files
 
 ### how fast?
 
-Compared to [gophersat](https://github.com/crillab/gophersat) (a Go CDCL solver) and [MiniSat](https://github.com/niklasso/minisat) 2.2 (the classic C++ one, default settings) on my not-very-fast machine, median of 10 runs, one solve at a time:
+Compared to [gophersat](https://github.com/crillab/gophersat) (a Go CDCL solver) and [MiniSat](https://github.com/niklasso/minisat) 2.2 (the classic C++ one, run with `-no-pre` since loki doesn't preprocess either) on my not-very-fast machine, median of 10 runs, one solve at a time:
 
 | benchmark set | loki | gophersat | MiniSat |
 |---|---|---|---|
-| bmc (13 hardware verification files) | 6.7 s | 9.3 s | 3.2 s |
-| uuf250 (5 hard random Unsat files) | 11.2 s | 17.0 s | 16.5 s |
-| qg (3 quasigroup files) | 4.8 s | 5.7 s | 2.8 s |
+| bmc (13 hardware verification files) | 5.2 s | 9.2 s | 2.3 s |
+| uuf250 (5 hard random Unsat files) | 9.4 s | 16.9 s | 14.7 s |
+| qg (3 quasigroup files) | 3.8 s | 5.7 s | 3.1 s |
+
+Clause minimization made loki about 18% faster overall (22.5 s → 18.4 s for all 21 files). bmc is still where MiniSat leaves me in the dust.
 
 
 ## using it
@@ -44,7 +47,7 @@ odin build cmd/loki -o:speed -out:loki
 ./loki some_problem.cnf
 ```
 
-It prints the result, checks any SAT answer against the original clauses, and shows some stats (conflicts, decisions, restarts, learned clauses...). Build with `-define:LOKI_PROFILE=true` to also see where the time goes.
+It prints the result, checks any SAT answer against the original clauses, and shows some stats (conflicts, decisions, restarts, learned clauses, how many learned literals minimization removed...). Build with `-define:LOKI_PROFILE=true` to also see where the time goes.
 
 ### as an Odin package
 
@@ -75,7 +78,7 @@ main :: proc() {
 }
 ```
 
-If you want more control (settings like restarts or phase saving, or stats after the solve), use `parse_dimacs` + `solver_init` + `solve` directly. `api.odin` shows how they fit together.
+If you want more control (settings like restarts, phase saving or clause minimization, or stats after the solve), use `parse_dimacs` + `solver_init` + `solve` directly. `api.odin` shows how they fit together.
 
 ### tests and benchmarks
 

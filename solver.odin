@@ -78,6 +78,7 @@ Solver :: struct {
 	// Internal
 	formula:          ^Formula,
 	values:           []LBool,
+	analyze_stack:    [dynamic]Literal,
 	seen_to_clear:    [dynamic]Literal,
 	trail:            [dynamic]Literal,
 	level_starts:     [dynamic]int,
@@ -121,7 +122,7 @@ solver_init :: proc(f: ^Formula) -> Solver {
 		reduce_first     = 2000,
 		reduce_inc       = 300,
 		restart_schedule = .Geometric,
-		minimize         = .Local,
+		minimize         = .Recursive,
 		restart_unit     = 100,
 		phase_saving     = true,
 		watches          = make([][dynamic]Watch, 2 * f.num_vars),
@@ -169,6 +170,7 @@ solver_destroy :: proc(s: ^Solver) {
 	delete(s.infos)
 	delete(s.polarity)
 	delete(s.seen_to_clear)
+	delete(s.analyze_stack)
 	heap_destroy(&s.order)
 }
 
@@ -526,7 +528,21 @@ analyze :: proc(s: ^Solver, confl: int) -> (learnt: [dynamic]Literal, backjump_l
 			}
 		}
 		resize(&learnt, j)
-	case .Recursive: // Still nothing for now...until part2
+	case .Recursive:
+		levels: u32 = 0
+		for i in 1 ..< len(learnt) {
+			levels |= abstract_level(s, lit_var(learnt[i]))
+		}
+		j := 1
+		for i in 1 ..< len(learnt) {
+			v := lit_var(learnt[i])
+			keep := s.reasons[v] == NO_REASON || !lit_redundant(s, learnt[i], levels)
+			if keep {
+				learnt[j] = learnt[i]
+				j += 1
+			}
+		}
+		resize(&learnt, j)
 	}
 
 
@@ -680,4 +696,40 @@ luby :: proc(i: int) -> int {
 		}
 		n -= (size - 1) / 2
 	}
+}
+
+@(private)
+abstract_level :: proc(s: ^Solver, v: Var) -> u32 {
+	return u32(1) << uint(s.levels[v] & 31)
+}
+
+@(private)
+lit_redundant :: proc(s: ^Solver, p: Literal, abstract_levels: u32) -> bool {
+	clear(&s.analyze_stack)
+	append(&s.analyze_stack, p)
+
+	top := len(s.seen_to_clear)
+	for len(s.analyze_stack) > 0 {
+		q := pop(&s.analyze_stack)
+		c := s.formula.clauses[s.reasons[lit_var(q)]]
+		for l in c[1:] {
+			v := lit_var(l)
+			if s.seen[v] || s.levels[v] == 0 {
+				continue
+			}
+			if s.reasons[v] != NO_REASON && abstract_level(s, v) & abstract_levels != 0 {
+				s.seen[v] = true
+				append(&s.analyze_stack, l)
+				append(&s.seen_to_clear, l)
+			} else {
+				for i in top ..< len(s.seen_to_clear) {
+					s.seen[lit_var(s.seen_to_clear[i])] = false
+				}
+				resize(&s.seen_to_clear, top)
+				return false
+			}
+		}
+	}
+
+	return true
 }

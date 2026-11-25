@@ -41,7 +41,7 @@ decide :: proc(s: ^Solver, l: Literal) {
 	assign(s, l, NO_REASON)
 }
 
-// backtrack had a bug in Lesson 10: it saved polarity[level] instead of
+// backtrack had a a bug earlier..it saved polarity[level] instead of
 // polarity[lit_var(l)]. This test catches that, and checks everything else
 // backtrack is responsible for.
 @(test)
@@ -69,7 +69,7 @@ backtrack_undoes_levels_and_saves_phases :: proc(t: ^testing.T) {
 	testing.expect_value(t, s.values[0], LBool.True)
 	for v in 1 ..< 4 {
 		testing.expectf(t, s.values[v] == .Undef, "var %d still assigned after backtrack", v)
-		// invariant from Lesson 11b: every unassigned variable is in the heap
+		//  every unassigned variable is in the heap
 		testing.expectf(
 			t,
 			heap_contains(&s.order, Var(v)),
@@ -201,7 +201,7 @@ analyze_hand_example :: proc(t: ^testing.T) {
 }
 
 // pick_unassigned (the heap) must choose exactly what the old linear scan
-// chose: highest activity, lower variable on ties. Lesson 11b relies on this.
+// chose: highest activity, lower variable on ties.
 @(test)
 pick_matches_linear_scan :: proc(t: ^testing.T) {
 	f, s := fixture(t, "p cnf 40 0\n")
@@ -234,7 +234,7 @@ pick_matches_linear_scan :: proc(t: ^testing.T) {
 	testing.expect(t, !ok) // everything assigned
 }
 
-// scan_unassigned is the Lesson 7-10 pick_unassigned, kept as a reference.
+// scan_unassigned is the earlier pick_unassigned, kept as a reference for now.
 @(private = "file")
 scan_unassigned :: proc(s: ^Solver) -> (Var, bool) {
 	best := -1
@@ -300,7 +300,7 @@ collect_victims_rules :: proc(t: ^testing.T) {
 	}
 }
 
-// The asserts removed in Lesson 11b, as one test. A pigeonhole formula with a
+// asserts removed previously removed, as one test. A pigeonhole formula with a
 // tiny reduction schedule forces many learned clauses and several reduce_db
 // calls, then every invariant is checked.
 @(test)
@@ -440,7 +440,6 @@ pigeonhole :: proc(pigeons, holes: int) -> string {
 	return strings.to_string(b)
 }
 
-// Lesson 11c: watch entries with blocking literals.
 
 // A binary clause whose blocker is true is skipped without being loaded, so
 // nothing is assigned and its literal order is untouched (a load would have
@@ -686,4 +685,310 @@ random_3sat :: proc(num_vars, num_clauses: int, seed: u64) -> string {
 		strings.write_string(&b, "0\n")
 	}
 	return strings.to_string(b)
+}
+
+
+// With a=1 b=2 c=3 d=4 u=5 x=6. Deciding a, then u, gives one conflict whose 1UIP clause is
+// (¬u ∨ ¬a ∨ ¬d ∨ ¬c). d's reason (d ∨ ¬a) is covered by the clause, so local
+// minimization drops ¬d. c is forced by b, which is forced by a, so only
+// recursive minimization drops ¬c as well.
+@(private = "file")
+MINIMIZE_EXAMPLE :: "p cnf 6 5\n-1 2 0\n-2 3 0\n-1 4 0\n-5 -3 6 0\n-5 -1 -4 -6 0\n"
+
+// The same example, except d's reason also needs x7, a level-0 fact:
+// (d ∨ ¬a ∨ ¬x7). A false level-0 literal counts as covered, so ¬d is still
+// redundant in both modes.
+@(private = "file")
+MINIMIZE_LEVEL0_EXAMPLE :: "p cnf 7 6\n7 0\n-1 2 0\n-2 3 0\n-1 -7 4 0\n-5 -3 6 0\n-5 -1 -4 -6 0\n"
+
+@(private = "file")
+Minimize_Case :: struct {
+	text: string,
+	mode: Minimize_Mode,
+	want: []int, // DIMACS literals expected in learnt[1:], in any order
+}
+
+// Each case decides a (=1) then u (=5), analyzes the conflict, and checks the
+// learned clause, the literal stats and the seen cleanup.
+@(test)
+minimize_modes_on_example :: proc(t: ^testing.T) {
+	cases := [?]Minimize_Case {
+		{MINIMIZE_EXAMPLE, .None, {-1, -4, -3}},
+		{MINIMIZE_EXAMPLE, .Local, {-1, -3}},
+		{MINIMIZE_EXAMPLE, .Recursive, {-1}},
+		{MINIMIZE_LEVEL0_EXAMPLE, .Local, {-1, -3}},
+		{MINIMIZE_LEVEL0_EXAMPLE, .Recursive, {-1}},
+	}
+	for tc, n in cases {
+		f, s := fixture(t, tc.text)
+		defer teardown(f, &s)
+		s.minimize = tc.mode
+
+		// the level-0 unit, if there is one, as solve would assign it
+		for c in f.clauses {
+			if len(c) == 1 {
+				assign(&s, c[0], NO_REASON)
+			}
+		}
+		testing.expect_value(t, propagate(&s), NO_REASON)
+		decide(&s, L(1))
+		testing.expect_value(t, propagate(&s), NO_REASON)
+		decide(&s, L(5))
+		confl := propagate(&s)
+		if !testing.expectf(t, confl != NO_REASON, "case %d: no conflict", n) {
+			continue
+		}
+
+		learnt, backjump_level := analyze(&s, confl)
+		defer delete(learnt)
+
+		testing.expectf(t, learnt[0] == L(-5), "case %d: slot 0 is %d, want ¬u", n, learnt[0])
+		testing.expectf(
+			t,
+			backjump_level == 1,
+			"case %d: backjump level %d, want 1",
+			n,
+			backjump_level,
+		)
+		if testing.expectf(
+			t,
+			len(learnt) == 1 + len(tc.want),
+			"case %d (%v): %d literals, want %d",
+			n,
+			tc.mode,
+			len(learnt),
+			1 + len(tc.want),
+		) {
+			for x in tc.want {
+				testing.expectf(
+					t,
+					slice.contains(learnt[1:], L(x)),
+					"case %d (%v): %d missing",
+					n,
+					tc.mode,
+					x,
+				)
+			}
+		}
+		// the stats count the 1UIP clause before minimizing, and what's left after
+		testing.expectf(
+			t,
+			s.max_literals == 4,
+			"case %d: max_literals %d, want 4",
+			n,
+			s.max_literals,
+		)
+		testing.expectf(
+			t,
+			s.tot_literals == len(learnt),
+			"case %d: tot_literals %d, want %d",
+			n,
+			s.tot_literals,
+			len(learnt),
+		)
+		// every mark minimization made must be gone for the next conflict
+		for v in 0 ..< int(f.num_vars) {
+			testing.expectf(t, !s.seen[v], "case %d (%v): seen[%d] left set", n, tc.mode, v)
+		}
+	}
+}
+
+// Nothing to remove: analyze_hand_example's clause is (¬x1 ∨ ¬x4), and x4 is a
+// decision, so every mode must return it unchanged.
+@(test)
+minimize_keeps_decisions :: proc(t: ^testing.T) {
+	for mode in Minimize_Mode {
+		f, s := fixture(t, "p cnf 4 3\n-1 2 0\n-1 -4 3 0\n-2 -3 0\n")
+		defer teardown(f, &s)
+		s.minimize = mode
+
+		decide(&s, L(4))
+		testing.expect_value(t, propagate(&s), NO_REASON)
+		decide(&s, L(1))
+		confl := propagate(&s)
+		if !testing.expect(t, confl != NO_REASON) {
+			continue
+		}
+		learnt, _ := analyze(&s, confl)
+		defer delete(learnt)
+
+		testing.expectf(t, len(learnt) == 2, "%v: %d literals, want 2", mode, len(learnt))
+		testing.expectf(
+			t,
+			s.max_literals == s.tot_literals,
+			"%v: %d -> %d literals",
+			mode,
+			s.max_literals,
+			s.tot_literals,
+		)
+		for v in 0 ..< 4 {
+			testing.expectf(t, !s.seen[v], "%v: seen[%d] left set", mode, v)
+		}
+	}
+}
+
+// rup_implied reports whether clause c follows from clauses plus the unit
+// literals by unit propagation alone: assume every literal of c is false, then
+// propagate to a fixpoint and look for a clause with every literal false. It is
+// deliberately simple and independent of propagate, so it can check it.
+@(private = "file")
+rup_implied :: proc(num_vars: int, clauses: []Clause, units: []Literal, c: Clause) -> bool {
+	values := make([]LBool, num_vars)
+	defer delete(values)
+	value :: proc(values: []LBool, l: Literal) -> LBool {
+		v := values[lit_var(l)]
+		if v == .Undef || !lit_is_neg(l) {
+			return v
+		}
+		return .False if v == .True else .True
+	}
+	set :: proc(values: []LBool, l: Literal) -> (conflict: bool) {
+		switch value(values, l) {
+		case .True:
+		case .False:
+			return true
+		case .Undef:
+			values[lit_var(l)] = .False if lit_is_neg(l) else .True
+		}
+		return false
+	}
+	for l in units {
+		if set(values, l) {
+			return true
+		}
+	}
+	for l in c {
+		if set(values, lit_not(l)) {
+			return true
+		}
+	}
+	for changed := true; changed; {
+		changed = false
+		for d in clauses {
+			if d == nil {
+				continue
+			}
+			unassigned := 0
+			last: Literal
+			satisfied := false
+			for l in d {
+				switch value(values, l) {
+				case .True:
+					satisfied = true
+				case .Undef:
+					unassigned += 1
+					last = l
+				case .False:
+				}
+				if satisfied {
+					break
+				}
+			}
+			if satisfied {
+				continue
+			}
+			if unassigned == 0 {
+				return true
+			}
+			if unassigned == 1 {
+				set(values, last)
+				changed = true
+			}
+		}
+	}
+	return false
+}
+
+// Every clause loki learns must follow from the formula. Check each one by unit
+// propagation (the RUP check that proof checkers use) against the original
+// clauses, the clauses learned before it, and the level-0 facts. Clause deletion
+// is turned off so that every learned clause is still there to check.
+@(test)
+minimized_clauses_are_implied :: proc(t: ^testing.T) {
+	texts := [?]string {
+		random_3sat(50, 215, 11),
+		random_3sat(50, 215, 12),
+		random_3sat(60, 258, 13),
+		pigeonhole(5, 4),
+	}
+	defer for text in texts {
+		delete(text)
+	}
+
+	for text, n in texts {
+		for mode in ([]Minimize_Mode{.Local, .Recursive}) {
+			f, s := fixture(t, text)
+			defer teardown(f, &s)
+			s.minimize = mode
+			s.reduce_first = max(int) / 2 // no deletion
+			n_original := len(f.clauses)
+
+			solve(&s)
+			testing.expectf(
+				t,
+				s.conflicts >= 20,
+				"formula %d: only %d conflicts, test checks too little",
+				n,
+				s.conflicts,
+			)
+
+			level0_end := s.level_starts[0] if len(s.level_starts) > 0 else len(s.trail)
+			units := s.trail[:level0_end]
+			for ci in n_original ..< len(f.clauses) {
+				if !testing.expectf(
+					t,
+					rup_implied(int(f.num_vars), f.clauses[:ci], units, f.clauses[ci]),
+					"formula %d (%v): learned clause %d is not implied",
+					n,
+					mode,
+					ci,
+				) {
+					break
+				}
+			}
+		}
+	}
+}
+
+// A failed check must undo its marks. z=1 y=2 q=3 a=4 p1=5 p2=6 u=7 x=8.
+// Level 1 decides z, which forces y and q. Level 2 decides a, which forces p1
+// and p2 (each from a and y). Level 3 decides u, which forces x, and the clause
+// (¬x ∨ ¬u ∨ ¬a ∨ ¬p1 ∨ ¬p2 ∨ ¬q) is all false. The 1UIP clause is
+// (¬u ∨ ¬a ∨ ¬p1 ∨ ¬p2 ∨ ¬q), and nothing in it is redundant: every chain ends
+// at z, a decision that isn't in the clause. Checking p1 marks y before it
+// fails at z. If that mark isn't undone, p2's check stops at y as if it were
+// covered, and p2 is wrongly removed.
+@(test)
+minimize_undoes_failed_check :: proc(t: ^testing.T) {
+	f, s := fixture(
+		t,
+		"p cnf 8 6\n-1 2 0\n-1 3 0\n-2 -4 5 0\n-2 -4 6 0\n-7 8 0\n-8 -7 -4 -5 -6 -3 0\n",
+	)
+	defer teardown(f, &s)
+	s.minimize = .Recursive
+
+	decide(&s, L(1))
+	testing.expect_value(t, propagate(&s), NO_REASON)
+	decide(&s, L(4))
+	testing.expect_value(t, propagate(&s), NO_REASON)
+	decide(&s, L(7))
+	confl := propagate(&s)
+	if !testing.expect(t, confl != NO_REASON) {
+		return
+	}
+	learnt, _ := analyze(&s, confl)
+	defer delete(learnt)
+
+	testing.expectf(t, len(learnt) == 5, "%d literals, want 5 (nothing is redundant)", len(learnt))
+	for x in ([]int{-7, -4, -5, -6, -3}) {
+		testing.expectf(
+			t,
+			slice.contains(learnt[:], L(x)),
+			"%d missing from the learned clause",
+			x,
+		)
+	}
+	for v in 0 ..< 8 {
+		testing.expectf(t, !s.seen[v], "seen[%d] left set", v)
+	}
 }
