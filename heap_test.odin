@@ -1,3 +1,4 @@
+#+private
 package loki
 
 import "core:testing"
