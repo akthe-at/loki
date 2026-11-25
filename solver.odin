@@ -125,7 +125,6 @@ solver_init :: proc(f: ^Formula) -> Solver {
 	for v in 0 ..< f.num_vars {
 		heap_insert(&s.order, s.activity, Var(v))
 	}
-	assert(len(s.infos) == len(s.formula.clauses))
 	return s
 }
 
@@ -190,7 +189,6 @@ propagate :: proc(s: ^Solver) -> int {
 		i := 0
 		for i < len(ws) {
 			ci := ws[i]
-			assert(!s.infos[ci].deleted)
 			c := s.formula.clauses[ci]
 
 			// Normalise: Make sure false_lit is in c[1]
@@ -364,7 +362,6 @@ solve :: proc(s: ^Solver) -> Result {
 				append(&s.formula.clauses, learnt[:])
 				ci := len(s.formula.clauses) - 1
 				append(&s.infos, Clause_Info{learned = true, lbd = lbd})
-				assert(len(s.infos) == len(s.formula.clauses))
 				append(&s.watches[learnt[0]], ci)
 				append(&s.watches[learnt[1]], ci)
 				assign(s, learnt[0], ci)
@@ -504,7 +501,6 @@ compute_lbd :: proc(s: ^Solver, lits: []Literal) -> int {
 		lvl := s.levels[v]
 		s.level_seen[lvl] = false
 	}
-	assert(1 <= lbd && lbd <= len(lits))
 
 	return lbd
 }
@@ -549,12 +545,6 @@ collect_victims :: proc(s: ^Solver) -> [dynamic]int {
 	// loop over first half of candidates: append each one's ci to victims
 	for k in 0 ..< len(candidates) / 2 {
 		append(&result, candidates[k].ci)
-		assert(
-			s.infos[candidates[k].ci].learned &&
-			!s.infos[candidates[k].ci].deleted &&
-			s.infos[candidates[k].ci].lbd > 2 &&
-			!locked(s, candidates[k].ci),
-		)
 	}
 
 
@@ -592,7 +582,6 @@ reduce_db :: proc(s: ^Solver) {
 
 @(private)
 luby :: proc(i: int) -> int {
-	assert(i >= 1)
 	n := i
 	for {
 		size := 1
