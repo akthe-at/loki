@@ -25,9 +25,9 @@ stuff I've built so far, roughly in order:
 
 - **next up:** 
     - [x] VSIDS and restarts.
-    - [ ] cleaning out old learned clauses so memory doesn't grow forever
-    - [ ] phase saving
-    - [ ] luby restarts
+    - [x] clean up old learned clauses so memory doesn't grow forever
+    - [x] phase saving
+    - [x] luby restarts
     - [ ] then the CP side: "exactly k of these" constraints, optimization (best answer, not just any answer), integer variables with lazy clause generation
 
 I've got a couple real-world use cases for this at work and in personal projects that I want an alternative to CP-SAT to use with.
