@@ -1,68 +1,85 @@
 package loki
 
-import "core:fmt"
 import "core:os"
 import "core:strconv"
 import "core:strings"
 
-// parse_dimacs reads a DIMACS CNF file. On success the caller owns the returned
-// formula and must free it with formula_destroy.
-parse_dimacs :: proc(path: string) -> (f: Formula, ok: bool) {
-	// Read the file. If it fails, return {}, false.
-	data, err := os.read_entire_file(path, context.allocator)
-	if err != nil {
-		fmt.println("Error reading file:", err)
-		return {}, false
-	}
-	defer delete(data)
 
-	text := string(data)
+Parse_Error :: enum {
+	None,
+	File_Read,
+	Missing_Header,
+	Bad_Header,
+	Bad_Literal,
+	Literal_Out_Of_Range,
+	Unterminated_Clause,
+}
+
+parse_dimacs_string :: proc(text: string) -> (f: Formula, err: Parse_Error) {
+	seen_header := false
 	rest := text
 	current: [dynamic]Literal
 	defer delete(current)
-	defer if !ok {formula_destroy(&f)}
-	//      - For each line:
-	//        - empty or starts with c: skip it (continue)
+	// On any error, free the clauses parsed so far.
+	defer if err != nil {formula_destroy(&f)}
+
 	for line in strings.split_lines_iterator(&rest) {
 		if len(line) == 0 || strings.starts_with(line, "c") {
-			// skip header
+			// skip blank lines and comments
 			continue
 		}
 
 		if strings.starts_with(line, "%") {
 			break
 		}
-		// Parse the third word into f.num_vars.
-		//- starts with p: the words are p, cnf, 3, 2.
-		//	You'll need a conversion, since parse_int gives an int
-		//  and the field is u32.
+		// Header: "p cnf <num_vars> <num_clauses>". The third word is num_vars.
 		if strings.starts_with(line, "p") {
-			// parse the third word into f.num_vars
 			header := line
 			count := 0
 			for w in strings.fields_iterator(&header) {
 				count += 1
 				if count == 3 {
 					n, ok := strconv.parse_int(w)
-					if !ok {return f, false}
+					if !ok || n < 0 {return f, .Bad_Header}
 					f.num_vars = u32(n)
 					break
 				}
 			}
+			if count < 3 {return f, .Bad_Header}
+			seen_header = true
 			continue
 		}
+		// Every line that reaches here is a clause line.
+		if !seen_header {return f, .Missing_Header}
+
 		words := line
 		for word in strings.fields_iterator(&words) {
 			lit, ok := strconv.parse_int(word)
-			if !ok {return f, false}
+			if !ok {return f, .Bad_Literal}
 			if lit == 0 {
 				// finish the current clause
 				append(&f.clauses, current[:])
 				current = {}
 			} else {
+				if abs(lit) > int(f.num_vars) {return f, .Literal_Out_Of_Range}
 				append(&current, lit_from_dimacs(lit))
 			}
 		}
 	}
-	return f, true
+	if len(current) > 0 {
+		return f, .Unterminated_Clause
+	}
+	return f, nil
+}
+
+// parse_dimacs reads a DIMACS CNF file. On success the caller owns the returned
+// formula and must free it with formula_destroy.
+parse_dimacs :: proc(path: string) -> (f: Formula, err: Parse_Error) {
+	data, read_error := os.read_entire_file(path, context.allocator)
+	if read_error != nil {
+		return {}, .File_Read
+	}
+	defer delete(data)
+
+	return parse_dimacs_string(string(data))
 }
