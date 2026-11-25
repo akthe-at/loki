@@ -1,6 +1,11 @@
 package loki
 
 import "core:slice"
+import "core:time"
+
+// LOKI_PROFILE turns on timing of propagate, pick_unassigned and analyze.
+// Build with -define:LOKI_PROFILE=true; normal builds compile no timing code.
+LOKI_PROFILE :: #config(LOKI_PROFILE, false)
 
 // NO_REASON is the sentinel for "no clause": no implying reason or no conflict.
 @(private)
@@ -48,6 +53,7 @@ Victim_Candidate :: struct {
 // Settings (set after solver_init, before solve):
 // 	phase_saving, restart_schedule, restart_unit, reduce_first, reduce_inc.
 // Statistics (read after solve): conflicts, decisions, restarts, deleted, reductions.
+// prop_time, pick_time and analyze_time are filled in only in LOKI_PROFILE builds.
 // On .Sat, values hold the assignment.
 // All other fields are internal.
 Solver :: struct {
@@ -73,6 +79,9 @@ Solver :: struct {
 	restarts:         int,
 	deleted:          int,
 	reductions:       int,
+	prop_time:        time.Duration,
+	pick_time:        time.Duration,
+	analyze_time:     time.Duration,
 	// Settings
 	phase_saving:     bool,
 	restart_schedule: Restart_Schedule,
@@ -298,7 +307,9 @@ solve :: proc(s: ^Solver) -> Result {
 	conflicts_since_restart := 0
 
 	for {
+		when LOKI_PROFILE {t0 := time.tick_now()}
 		confl := propagate(s)
+		when LOKI_PROFILE {s.prop_time += time.tick_since(t0)}
 
 		switch confl {
 		case NO_REASON:
@@ -319,7 +330,9 @@ solve :: proc(s: ^Solver) -> Result {
 				}
 				continue
 			}
+			when LOKI_PROFILE {t1 := time.tick_now()}
 			v, ok := pick_unassigned(s)
+			when LOKI_PROFILE {s.pick_time += time.tick_since(t1)}
 			if !ok {
 				return .Sat
 			}
@@ -336,7 +349,9 @@ solve :: proc(s: ^Solver) -> Result {
 			if decision_level(s) == 0 {
 				return .Unsat
 			}
+			when LOKI_PROFILE {t2 := time.tick_now()}
 			learnt, bj_level := analyze(s, confl)
+			when LOKI_PROFILE {s.analyze_time += time.tick_since(t2)}
 			s.var_inc /= 0.95
 			s.conflicts += 1
 			conflicts_since_restart += 1

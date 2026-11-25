@@ -86,6 +86,19 @@ main :: proc() {
 
 	learned := len(f.clauses) - n_original
 	fmt.printf("time:      %.2f ms\n", time.duration_milliseconds(elapsed))
+	// Profile builds only: where the solve time went.
+	when loki.LOKI_PROFILE {
+		total := time.duration_milliseconds(elapsed)
+		Row :: struct {
+			name: string,
+			d:    time.Duration,
+		}
+		rows := [?]Row{{"propagate", s.prop_time}, {"pick_unassigned", s.pick_time}, {"analyze", s.analyze_time}}
+		for row in rows {
+			ms := time.duration_milliseconds(row.d)
+			fmt.printf("  %-16s %8.1f ms  %5.1f%%\n", row.name, ms, 100 * ms / total)
+		}
+	}
 	fmt.println("conflicts:", s.conflicts)
 	fmt.println("decisions:", s.decisions)
 	fmt.println("restarts: ", s.restarts)
