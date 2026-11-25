@@ -6,7 +6,7 @@ import "core:strings"
 import "core:testing"
 
 // solve_text parses text, solves it with the given settings, and for a Sat
-// answer checks the model against the ORIGINAL clauses (solve appends learned
+// answer checks the solution against the ORIGINAL clauses (solve appends learned
 // clauses to the formula, so those are left out).
 solve_text :: proc(
 	t: ^testing.T,
@@ -29,13 +29,13 @@ solve_text :: proc(
 
 	result := loki.solve(&s)
 	if result == .Sat {
-		model := make([]bool, f.num_vars)
-		defer delete(model)
+		solution := make([]bool, f.num_vars)
+		defer delete(solution)
 		for v, i in s.values {
-			model[i] = v == .True
+			solution[i] = v == .True
 		}
 		for c, ci in f.clauses[:n_original] {
-			testing.expectf(t, loki.clause_satisfied(c, model), "Sat model breaks clause %d", ci, loc = loc)
+			testing.expectf(t, loki.clause_satisfied(c, solution), "Sat solution breaks clause %d", ci, loc = loc)
 		}
 	}
 	return result
@@ -98,11 +98,11 @@ solve_pigeonhole :: proc(t: ^testing.T) {
 // The one-call API, on the two small files in tests/data.
 @(test)
 solve_file_cases :: proc(t: ^testing.T) {
-	result, model, err := loki.solve_file("tests/data/test.cnf")
-	defer delete(model)
+	result, solution, err := loki.solve_file("tests/data/test.cnf")
+	defer delete(solution)
 	testing.expect_value(t, err, loki.Parse_Error.None)
 	testing.expect_value(t, result, loki.Result.Sat)
-	testing.expect_value(t, len(model), 3)
+	testing.expect_value(t, len(solution), 3)
 
 	r2, m2, e2 := loki.solve_file("tests/data/prop.cnf")
 	testing.expect_value(t, e2, loki.Parse_Error.None)
@@ -110,13 +110,13 @@ solve_file_cases :: proc(t: ^testing.T) {
 	testing.expect(t, m2 == nil)
 }
 
-// A parse error gives Unknown and no model, never a Sat.
+// A parse error gives Unknown and no solution, never a Sat.
 @(test)
 solve_file_missing :: proc(t: ^testing.T) {
-	result, model, err := loki.solve_file("tests/data/no-such-file.cnf")
+	result, solution, err := loki.solve_file("tests/data/no-such-file.cnf")
 	testing.expect_value(t, err, loki.Parse_Error.File_Read)
 	testing.expect_value(t, result, loki.Result.Unknown)
-	testing.expect(t, model == nil)
+	testing.expect(t, solution == nil)
 }
 
 // pigeonhole_dimacs writes PHP(pigeons, holes) as DIMACS text. Variable

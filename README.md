@@ -64,16 +64,16 @@ import "core:fmt"
 import loki "loki"
 
 main :: proc() {
-	result, model, err := loki.solve_file("puzzle.cnf")
+	result, solution, err := loki.solve_file("puzzle.cnf")
 	if err != nil {
 		fmt.eprintln("couldn't read it:", err)
 		return
 	}
-	defer delete(model)
+	defer delete(solution)
 
 	fmt.println(result) // Sat or Unsat
 	if result == .Sat {
-		fmt.println("x1 =", model[0]) // model is 0-based: DIMACS var 1 is model[0]
+		fmt.println("x1 =", solution[0]) // solution is 0-based: DIMACS var 1 is solution[0]
 	}
 }
 ```

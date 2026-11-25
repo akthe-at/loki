@@ -6,7 +6,7 @@ import "core:log"
 import "core:testing"
 
 // A few real SATLIB files, solved end to end through the public API, with the
-// model checked for every Sat answer. bench/ is gitignored (fetch it with
+// solution checked for every Sat answer. bench/ is gitignored (fetch it with
 // scripts/fetch_bench.sh), so a missing file is skipped, not failed.
 @(test)
 bench_files_self_check :: proc(t: ^testing.T) {
@@ -38,13 +38,13 @@ bench_files_self_check :: proc(t: ^testing.T) {
 			result := loki.solve(&s)
 			testing.expectf(t, result == set.want, "%s: got %v, want %v", path, result, set.want)
 			if result == .Sat {
-				model := make([]bool, f.num_vars)
-				defer delete(model)
+				solution := make([]bool, f.num_vars)
+				defer delete(solution)
 				for v, k in s.values {
-					model[k] = v == .True
+					solution[k] = v == .True
 				}
 				for c in f.clauses[:n_original] {
-					if !testing.expectf(t, loki.clause_satisfied(c, model), "%s: model breaks a clause", path) {
+					if !testing.expectf(t, loki.clause_satisfied(c, solution), "%s: solution breaks a clause", path) {
 						break
 					}
 				}

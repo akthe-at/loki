@@ -1,14 +1,14 @@
 package loki
 
-// solve_file parses and solves a DIMACS file. On .Sat, `model[v]` is the value
-// of variable v (0-based); the caller owns model and frees it with delete.
-// On a parse error, result is .Unknown and model is nil.
+// solve_file parses and solves a DIMACS file. On .Sat, `solution[v]` is the value
+// of variable v (0-based); the caller owns solution and frees it with delete.
+// On a parse error, result is .Unknown and solution is nil.
 solve_file :: proc(
 	path: string,
 	allocator := context.allocator,
 ) -> (
 	result: Result,
-	model: []bool,
+	solution: []bool,
 	err: Parse_Error,
 ) {
 	f := parse_dimacs(path) or_return
@@ -20,15 +20,15 @@ solve_file :: proc(
 	result = solve(&s)
 
 	if result == .Sat {
-		model = make([]bool, f.num_vars, allocator)
+		solution = make([]bool, f.num_vars, allocator)
 		for v, i in s.values {
 			if v == .True {
-				model[i] = true
+				solution[i] = true
 			} else {
-				model[i] = false
+				solution[i] = false
 			}
 		}
 	}
 
-	return result, model, err
+	return result, solution, err
 }
