@@ -35,6 +35,13 @@ Restart_Schedule :: enum {
 }
 
 @(private)
+Watch :: struct {
+	ci:      int,
+	blocker: Literal,
+	binary:  bool,
+}
+
+@(private)
 Clause_Info :: struct {
 	lbd:     int,
 	learned: bool,
@@ -63,7 +70,7 @@ Solver :: struct {
 	trail:            [dynamic]Literal,
 	trail_lim:        [dynamic]int,
 	infos:            [dynamic]Clause_Info,
-	watches:          [][dynamic]int,
+	watches:          [][dynamic]Watch,
 	qhead:            int,
 	levels:           []int,
 	reasons:          []int,
@@ -101,7 +108,7 @@ solver_init :: proc(f: ^Formula) -> Solver {
 		restart_schedule = .Geometric,
 		restart_unit     = 100,
 		phase_saving     = true,
-		watches          = make([][dynamic]int, 2 * f.num_vars),
+		watches          = make([][dynamic]Watch, 2 * f.num_vars),
 		values           = make([]LBool, f.num_vars),
 		seen             = make([]bool, f.num_vars),
 		level_seen       = make([]bool, f.num_vars + 1),
@@ -113,8 +120,8 @@ solver_init :: proc(f: ^Formula) -> Solver {
 	for c, i in f.clauses {
 		append(&s.infos, Clause_Info{})
 		if len(c) >= 2 {
-			append(&s.watches[c[0]], i)
-			append(&s.watches[c[1]], i)
+			append(&s.watches[c[0]], Watch{ci = i, blocker = c[1], binary = len(c) == 2})
+			append(&s.watches[c[1]], Watch{ci = i, blocker = c[0], binary = len(c) == 2})
 		}
 	}
 	for &v in s.polarity {
@@ -188,7 +195,30 @@ propagate :: proc(s: ^Solver) -> int {
 		ws := &s.watches[false_lit]
 		i := 0
 		for i < len(ws) {
-			ci := ws[i]
+			w := ws[i]
+
+			bv := lit_value(s, w.blocker)
+			if bv == .True {
+				i += 1
+				continue
+			}
+
+			if w.binary {
+
+				c := s.formula.clauses[w.ci]
+				if c[0] == false_lit {
+					c[0], c[1] = c[1], c[0]
+				}
+
+				if bv == .False {
+					return w.ci
+				}
+
+				assign(s, w.blocker, w.ci)
+				i += 1
+				continue
+			}
+			ci := ws[i].ci
 			c := s.formula.clauses[ci]
 
 			// Normalise: Make sure false_lit is in c[1]
@@ -197,6 +227,7 @@ propagate :: proc(s: ^Solver) -> int {
 			}
 			// Case 1: other watched lit is True -> Clause Satisfied
 			if lit_value(s, c[0]) == .True {
+				ws[i].blocker = c[0]
 				i += 1
 				continue
 			}
@@ -205,8 +236,8 @@ propagate :: proc(s: ^Solver) -> int {
 			for k in 2 ..< len(c) {
 				if lit_value(s, c[k]) != .False {
 					c[1], c[k] = c[k], c[1] // literal goes to watch pos 1
-					append(&s.watches[c[1]], ci) // register clause under new watch
-					unordered_remove(ws, i) //remove it from old watch list
+					append(&s.watches[c[1]], Watch{ci = ci, blocker = c[0], binary = false}) // register clause under new watch
+					unordered_remove(ws, i) // remove it from old watch list
 					found = true
 					break
 				}
@@ -218,6 +249,7 @@ propagate :: proc(s: ^Solver) -> int {
 			if lit_value(s, c[0]) == .False {
 				return ci
 			} else {
+				ws[i].blocker = c[0]
 				assign(s, c[0], ci)
 			}
 			i += 1
@@ -362,8 +394,14 @@ solve :: proc(s: ^Solver) -> Result {
 				append(&s.formula.clauses, learnt[:])
 				ci := len(s.formula.clauses) - 1
 				append(&s.infos, Clause_Info{learned = true, lbd = lbd})
-				append(&s.watches[learnt[0]], ci)
-				append(&s.watches[learnt[1]], ci)
+				append(
+					&s.watches[learnt[0]],
+					Watch{ci = ci, blocker = learnt[1], binary = len(learnt) == 2},
+				)
+				append(
+					&s.watches[learnt[1]],
+					Watch{ci = ci, blocker = learnt[0], binary = len(learnt) == 2},
+				)
 				assign(s, learnt[0], ci)
 			}
 		}
@@ -562,10 +600,9 @@ reduce_db :: proc(s: ^Solver) {
 
 	for &ws in s.watches {
 		j := 0
-		for ci in ws {
-
-			if !s.infos[ci].deleted {
-				ws[j] = ci
+		for w in ws {
+			if !s.infos[w.ci].deleted {
+				ws[j] = w
 				j += 1
 			}
 		}
