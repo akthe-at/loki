@@ -3,6 +3,7 @@ package loki
 import "core:slice"
 
 // NO_REASON is the sentinel for "no clause": no implying reason or no conflict.
+@(private)
 NO_REASON :: -1
 
 // The Lifted Boolean type is used to represent a boolean value that can also be undefined.
@@ -12,30 +13,45 @@ LBool :: enum u8 {
 	False,
 }
 
+// Result is the outcome of a solve attempt. Unknown (zero value) means no
+// answer was produced (e.g. the input failed to parse).
 Result :: enum {
+	Unknown,
 	Sat,
 	Unsat,
 }
 
+// Restart_Schedule chooses when the solver restarts. Geometric restarts
+// after restart_unit conflicts, then grows by 1.5x each time.
+// Luby restarts after restart_unit * luby(i) conflicts: (ie: 1, 1, 2, 1, 1, 2, 4)...
 Restart_Schedule :: enum {
 	Geometric,
 	Luby,
 }
 
+@(private)
 Clause_Info :: struct {
-	learned: bool,
 	lbd:     int,
+	learned: bool,
 	deleted: bool,
 }
 
+@(private)
 Victim_Candidate :: struct {
 	ci:  int,
 	lbd: int,
 }
 
 
-// Solver represents a SAT solver that operates on a given formula, maintains variable assignments, and tracks the trail of decisions made during the solving process.
+// Solver holds the state of one CDCL search over a Formula.
+//
+// Settings (set after solver_init, before solve):
+// 	phase_saving, restart_schedule, restart_unit, reduce_first, reduce_inc.
+// Statistics (read after solve): conflicts, decisions, restarts, deleted, reductions.
+// On .Sat, values hold the assignment.
+// All other fields are internal.
 Solver :: struct {
+	// Internal
 	formula:          ^Formula,
 	values:           []LBool,
 	trail:            [dynamic]Literal,
@@ -49,17 +65,19 @@ Solver :: struct {
 	level_seen:       []bool,
 	polarity:         []bool,
 	activity:         []f64,
-	phase_saving:     bool,
 	var_inc:          f64,
+	//Statistics
 	conflicts:        int,
 	decisions:        int,
 	restarts:         int,
 	deleted:          int,
-	reduce_first:     int,
-	reduce_inc:       int,
 	reductions:       int,
+	// Settings
+	phase_saving:     bool,
 	restart_schedule: Restart_Schedule,
 	restart_unit:     int,
+	reduce_first:     int,
+	reduce_inc:       int,
 }
 
 // solver_init creates a solver for f. The solver keeps a pointer to f, so f
@@ -130,6 +148,7 @@ clause_satisfied :: proc(c: Clause, assignment: []bool) -> bool {
 
 // assign makes l true at the current decision level and records why: a clause
 // index in reason, or NO_REASON for decisions and root units.
+@(private)
 assign :: proc(s: ^Solver, l: Literal, reason: int) {
 	v := lit_var(l)
 	s.reasons[v] = reason
@@ -144,6 +163,7 @@ assign :: proc(s: ^Solver, l: Literal, reason: int) {
 
 // propagate performs unit propagation on the trail. It returns the index of a
 // conflicting clause, or NO_REASON if none was found.
+@(private)
 propagate :: proc(s: ^Solver) -> int {
 	for s.qhead < len(s.trail) {
 		p := s.trail[s.qhead]
@@ -194,12 +214,14 @@ propagate :: proc(s: ^Solver) -> int {
 }
 
 // decision_level returns the number of active decisions; 0 is the root level.
+@(private)
 decision_level :: proc(s: ^Solver) -> int {
 	return len(s.trail_lim)
 }
 
 // new_decision_level starts a new decision level at the current trail length.
 // It must be called before assigning the decision literal.
+@(private)
 new_decision_level :: proc(s: ^Solver) {
 	current_trail_len := len(s.trail)
 	append(&s.trail_lim, current_trail_len)
@@ -208,6 +230,7 @@ new_decision_level :: proc(s: ^Solver) {
 
 // backtrack returns the solver to the given decision level, unassigning
 // everything above it.
+@(private)
 backtrack :: proc(s: ^Solver, level: int) {
 	if level >= decision_level(s) {
 		return
@@ -226,6 +249,7 @@ backtrack :: proc(s: ^Solver, level: int) {
 
 // pick_unassigned returns the unassigned variable with the highest activity,
 // or false if every variable is assigned.
+@(private)
 pick_unassigned :: proc(s: ^Solver) -> (Var, bool) {
 	best_score := -1.0
 	best_index := -1
@@ -352,6 +376,7 @@ solve :: proc(s: ^Solver) -> Result {
 // pick_unassigned.
 //
 // The caller owns the returned dynamic array.
+@(private)
 analyze :: proc(s: ^Solver, confl: int) -> (learnt: [dynamic]Literal, bj_level: int) {
 	append(&learnt, Literal(0)) // reserves slot 0 for the negated UIP
 
@@ -431,6 +456,7 @@ analyze :: proc(s: ^Solver, confl: int) -> (learnt: [dynamic]Literal, bj_level: 
 
 // bump adds var_inc to activity[v]; if the result exceeds 1e100, it rescales
 // all activities and var_inc by 1e-100 to avoid overflow.
+@(private)
 bump :: proc(s: ^Solver, v: Var) {
 	s.activity[v] += s.var_inc
 	if s.activity[v] > 1e100 {
@@ -443,6 +469,7 @@ bump :: proc(s: ^Solver, v: Var) {
 }
 
 // compute_lbd returns the number or distinct decision levels among lits.
+@(private)
 compute_lbd :: proc(s: ^Solver, lits: []Literal) -> int {
 	lbd := 0
 	for l in lits {
@@ -465,6 +492,7 @@ compute_lbd :: proc(s: ^Solver, lits: []Literal) -> int {
 	return lbd
 }
 
+@(private)
 locked :: proc(s: ^Solver, ci: int) -> bool {
 	c := s.formula.clauses[ci]
 
@@ -480,6 +508,7 @@ locked :: proc(s: ^Solver, ci: int) -> bool {
 //    true now and reasons[var] == ci". You need both halves because backtrack leaves old reasons entries
 //    behind, the same way it leaves levels behind, which ties back to the decision_level() vs s.levels[v]
 //    mix-up from earlier.
+@(private)
 collect_victims :: proc(s: ^Solver) -> [dynamic]int {
 	candidates: [dynamic]Victim_Candidate
 	defer delete(candidates)
@@ -516,11 +545,8 @@ collect_victims :: proc(s: ^Solver) -> [dynamic]int {
 	return result
 }
 
+@(private)
 reduce_db :: proc(s: ^Solver) {
-	// Mark. Set s.infos[ci].deleted = true for every victim.
-	// Clean the watch lists. Walk every watch list and drop the entries whose clause is marked deleted.
-	// Free. delete each victim's literals, and set its slot to nil.
-	// Count. s.deleted += len(victims).
 	victims := collect_victims(s)
 	defer delete(victims)
 	for ci in victims {
@@ -547,6 +573,7 @@ reduce_db :: proc(s: ^Solver) {
 	s.reductions += 1
 }
 
+@(private)
 luby :: proc(i: int) -> int {
 	assert(i >= 1)
 	n := i

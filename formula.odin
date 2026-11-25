@@ -3,8 +3,8 @@ package loki
 
 // Formula represents a CNF formula with a number of variables and a list of clauses.
 Formula :: struct {
-	num_vars: u32,
 	clauses:  [dynamic]Clause,
+	num_vars: u32,
 }
 
 // formula_satisfied reports whether every clause in f is true under assignment.

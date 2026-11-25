@@ -5,6 +5,8 @@ import "core:strconv"
 import "core:strings"
 
 
+// Parse_Error is the reason parsing failed. None (zero value) means
+// success, so callers can test err != nil
 Parse_Error :: enum {
 	None,
 	File_Read,
@@ -15,6 +17,8 @@ Parse_Error :: enum {
 	Unterminated_Clause,
 }
 
+// parses DIMACS CNF text. On success the caller owns the returned formula
+// and frees it with formula_destroy. On error the returned formula is empty.
 parse_dimacs_string :: proc(text: string) -> (f: Formula, err: Parse_Error) {
 	seen_header := false
 	rest := text
@@ -73,7 +77,7 @@ parse_dimacs_string :: proc(text: string) -> (f: Formula, err: Parse_Error) {
 }
 
 // parse_dimacs reads a DIMACS CNF file. On success the caller owns the returned
-// formula and must free it with formula_destroy.
+// formula and must free it with formula_destroy. On error the returned formula is empty.
 parse_dimacs :: proc(path: string) -> (f: Formula, err: Parse_Error) {
 	data, read_error := os.read_entire_file(path, context.allocator)
 	if read_error != nil {
