@@ -61,24 +61,24 @@ lit_pos_cases :: proc(t: ^testing.T) {
 	}
 }
 
-// lit_neg flips the sign: twice is the identity, and it matches negating in DIMACS.
+// lit_not flips the sign: twice is the identity, and it matches negating in DIMACS.
 @(test)
-lit_neg_cases :: proc(t: ^testing.T) {
+lit_not_cases :: proc(t: ^testing.T) {
 	for x in ([]int{1, -1, 3, -3, 250, -250}) {
 		l := loki.lit_from_dimacs(x)
 		testing.expectf(
 			t,
-			loki.lit_neg(loki.lit_neg(l)) == l,
-			"lit_neg(lit_neg(lit(%d))) != lit(%d)",
+			loki.lit_not(loki.lit_not(l)) == l,
+			"lit_not(lit_not(lit(%d))) != lit(%d)",
 			x,
 			x,
 		)
 		testing.expectf(
 			t,
-			loki.lit_neg(l) == loki.lit_from_dimacs(-x),
-			"lit_neg(lit(%d)) = %d, want lit(%d) = %d",
+			loki.lit_not(l) == loki.lit_from_dimacs(-x),
+			"lit_not(lit(%d)) = %d, want lit(%d) = %d",
 			x,
-			loki.lit_neg(l),
+			loki.lit_not(l),
 			-x,
 			loki.lit_from_dimacs(-x),
 		)

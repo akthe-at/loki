@@ -24,9 +24,9 @@ heap_contains :: proc(h: ^Var_Heap, v: Var) -> bool {
 	return h.index[v] >= 0
 }
 
-// before lets us know if a should be closer to the top of the heap than b:
+// heap_before lets us know if a should be closer to the top of the heap than b:
 // higher activity first, and on a tie, the lower-numbered variable.
-before :: proc(act: []f64, a, b: Var) -> bool {
+heap_before :: proc(act: []f64, a, b: Var) -> bool {
 	return act[a] > act[b] || (act[a] == act[b] && a < b)
 }
 
@@ -36,7 +36,7 @@ sift_up :: proc(h: ^Var_Heap, act: []f64, i: int) {
 	v := h.heap[i]
 	for i > 0 {
 		parent := (i - 1) / 2
-		if !before(act, v, h.heap[parent]) {
+		if !heap_before(act, v, h.heap[parent]) {
 			break
 		}
 		// parent slides down into the hole
@@ -60,10 +60,10 @@ sift_down :: proc(h: ^Var_Heap, act: []f64, i: int) {
 		if child >= n {
 			break
 		}
-		if child + 1 < n && before(act, h.heap[child + 1], h.heap[child]) {
+		if child + 1 < n && heap_before(act, h.heap[child + 1], h.heap[child]) {
 			child += 1
 		}
-		if !before(act, h.heap[child], v) {
+		if !heap_before(act, h.heap[child], v) {
 			break
 		}
 		h.heap[i] = h.heap[child]

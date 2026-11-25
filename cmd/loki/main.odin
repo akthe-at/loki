@@ -123,8 +123,8 @@ main :: proc() {
 	fmt.println("decisions:", s.decisions)
 	fmt.println("restarts: ", s.restarts)
 	fmt.println("learned:  ", learned)
-	fmt.println("deleted:", s.deleted)
-	fmt.println("alive:", learned - s.deleted)
+	fmt.println("deleted:", s.clauses_deleted)
+	fmt.println("alive:", learned - s.clauses_deleted)
 	fmt.println("reductions:", s.reductions)
 	// Learned-clause literals left after minimization, and the share removed
 	// (MiniSat's "conflict literals ... % deleted").

@@ -34,7 +34,10 @@ Restart_Schedule :: enum {
 	Luby,
 }
 
-// Minimize_Mode
+// Minimize_Mode chooses how analyze shortens each learned clause (MiniSat's
+// ccmin-mode 0/1/2). None keeps the 1UIP clause, Local drops literals whose
+// reason is already covered by the clause, and Recursive follows reasons
+// further back.
 Minimize_Mode :: enum {
 	None,
 	Local,
@@ -66,7 +69,7 @@ Victim_Candidate :: struct {
 //
 // Settings (set after solver_init, before solve): phase_saving,
 // restart_schedule, restart_unit, reduce_first, reduce_inc, and minimize.
-// Statistics (read after solve): conflicts, decisions, restarts, deleted,
+// Statistics (read after solve): conflicts, decisions, restarts, clauses_deleted,
 // reductions, max_literals, and tot_literals.
 // prop_time, pick_time and analyze_time are filled in only in LOKI_PROFILE builds.
 // On .Sat, values hold the assignment.
@@ -75,16 +78,16 @@ Solver :: struct {
 	// Internal
 	formula:          ^Formula,
 	values:           []LBool,
-	analyze_toclear:    [dynamic]Literal,
+	seen_to_clear:    [dynamic]Literal,
 	trail:            [dynamic]Literal,
-	trail_lim:     [dynamic]int,
+	level_starts:     [dynamic]int,
 	infos:            [dynamic]Clause_Info,
 	watches:          [][dynamic]Watch,
 	qhead:            int,
 	levels:           []int,
 	reasons:          []int,
 	seen:             []bool,
-	level_seen:       []bool,
+	lbd_levels:       []bool,
 	polarity:         []bool,
 	activity:         []f64,
 	order:            Var_Heap, // unassigned variables by activity; see heap.odin
@@ -93,7 +96,7 @@ Solver :: struct {
 	conflicts:        int,
 	decisions:        int,
 	restarts:         int,
-	deleted:  int,
+	clauses_deleted:  int,
 	reductions:       int,
 	max_literals:     int,
 	tot_literals:     int,
@@ -124,7 +127,7 @@ solver_init :: proc(f: ^Formula) -> Solver {
 		watches          = make([][dynamic]Watch, 2 * f.num_vars),
 		values           = make([]LBool, f.num_vars),
 		seen             = make([]bool, f.num_vars),
-		level_seen       = make([]bool, f.num_vars + 1),
+		lbd_levels       = make([]bool, f.num_vars + 1),
 		levels           = make([]int, f.num_vars),
 		reasons          = make([]int, f.num_vars),
 		activity         = make([]f64, f.num_vars),
@@ -152,7 +155,7 @@ solver_init :: proc(f: ^Formula) -> Solver {
 solver_destroy :: proc(s: ^Solver) {
 	delete(s.values)
 	delete(s.trail)
-	delete(s.trail_lim)
+	delete(s.level_starts)
 	// delete the inner before the outer
 	for v in s.watches {
 		delete(v)
@@ -160,12 +163,12 @@ solver_destroy :: proc(s: ^Solver) {
 	delete(s.watches)
 	delete(s.reasons)
 	delete(s.levels)
-	delete(s.level_seen)
+	delete(s.lbd_levels)
 	delete(s.seen)
 	delete(s.activity)
 	delete(s.infos)
 	delete(s.polarity)
-	delete(s.analyze_toclear)
+	delete(s.seen_to_clear)
 	heap_destroy(&s.order)
 }
 
@@ -204,7 +207,7 @@ propagate :: proc(s: ^Solver) -> int {
 	for s.qhead < len(s.trail) {
 		p := s.trail[s.qhead]
 		s.qhead += 1
-		false_lit := lit_neg(p)
+		false_lit := lit_not(p)
 
 		ws := &s.watches[false_lit]
 		i := 0
@@ -276,7 +279,7 @@ propagate :: proc(s: ^Solver) -> int {
 // decision_level returns the number of active decisions; 0 is the root level.
 @(private)
 decision_level :: proc(s: ^Solver) -> int {
-	return len(s.trail_lim)
+	return len(s.level_starts)
 }
 
 // new_decision_level starts a new decision level at the current trail length.
@@ -284,7 +287,7 @@ decision_level :: proc(s: ^Solver) -> int {
 @(private)
 new_decision_level :: proc(s: ^Solver) {
 	current_trail_len := len(s.trail)
-	append(&s.trail_lim, current_trail_len)
+	append(&s.level_starts, current_trail_len)
 }
 
 
@@ -295,7 +298,7 @@ backtrack :: proc(s: ^Solver, level: int) {
 	if level >= decision_level(s) {
 		return
 	}
-	target_trail_length := s.trail_lim[level]
+	target_trail_length := s.level_starts[level]
 	for len(s.trail) > target_trail_length {
 		l := pop(&s.trail)
 		if s.phase_saving {
@@ -305,7 +308,7 @@ backtrack :: proc(s: ^Solver, level: int) {
 		// Keep the invariant: every unassigned variable is in the heap.
 		heap_insert(&s.order, s.activity, lit_var(l))
 	}
-	resize(&s.trail_lim, level)
+	resize(&s.level_starts, level)
 	s.qhead = target_trail_length
 }
 
@@ -386,7 +389,7 @@ solve :: proc(s: ^Solver) -> Result {
 			if s.polarity[v] {
 				decision = lit_pos(v)
 			} else {
-				decision = lit_neg(lit_pos(v))
+				decision = lit_not(lit_pos(v))
 			}
 			assign(s, decision, NO_REASON)
 		case:
@@ -394,13 +397,13 @@ solve :: proc(s: ^Solver) -> Result {
 				return .Unsat
 			}
 			when LOKI_PROFILE {t2 := time.tick_now()}
-			learnt, bj_level := analyze(s, confl)
+			learnt, backjump_level := analyze(s, confl)
 			when LOKI_PROFILE {s.analyze_time += time.tick_since(t2)}
 			s.var_inc /= 0.95
 			s.conflicts += 1
 			conflicts_since_restart += 1
 			lbd := compute_lbd(s, learnt[:])
-			backtrack(s, bj_level)
+			backtrack(s, backjump_level)
 			if len(learnt) == 1 {
 				assign(s, learnt[0], NO_REASON)
 				delete(learnt)
@@ -434,7 +437,7 @@ solve :: proc(s: ^Solver) -> Result {
 //              earlier decision levels, with the highest-level one swapped
 //              into slot 1 so the two watched literals are the asserting one
 //              and the latest-level one.
-//   bj_level - highest decision level among learnt[1:], or 0 for a unit clause.
+//   backjump_level - highest decision level among learnt[1:], or 0 for a unit clause.
 //
 // As a side effect, bump (VSIDS) is applied to every newly seen literal above
 // decision level 0, so variables involved in recent conflicts are preferred by
@@ -442,7 +445,7 @@ solve :: proc(s: ^Solver) -> Result {
 //
 // The caller owns the returned dynamic array.
 @(private)
-analyze :: proc(s: ^Solver, confl: int) -> (learnt: [dynamic]Literal, bj_level: int) {
+analyze :: proc(s: ^Solver, confl: int) -> (learnt: [dynamic]Literal, backjump_level: int) {
 	append(&learnt, Literal(0)) // reserves slot 0 for the negated UIP
 
 	counter := 0 // seen literals at the current level still to resolve
@@ -494,10 +497,10 @@ analyze :: proc(s: ^Solver, confl: int) -> (learnt: [dynamic]Literal, bj_level: 
 	}
 
 	// after backjumping, all other learnt literals are still false, so the
-	// clause propagates lit_neg(p)
-	learnt[0] = lit_neg(p)
-	clear(&s.analyze_toclear)
-	append(&s.analyze_toclear, ..learnt[1:])
+	// clause propagates lit_not(p)
+	learnt[0] = lit_not(p)
+	clear(&s.seen_to_clear)
+	append(&s.seen_to_clear, ..learnt[1:])
 	s.max_literals += len(learnt)
 	switch s.minimize {
 	case .None:
@@ -530,12 +533,12 @@ analyze :: proc(s: ^Solver, confl: int) -> (learnt: [dynamic]Literal, bj_level: 
 	s.tot_literals += len(learnt)
 
 	// backjump level = highest level among learnt[1:], move that literal into slot 1
-	bj_level = 0
+	backjump_level = 0
 	max_i := 1
 	for i in 1 ..< len(learnt) {
 		lvl := s.levels[lit_var(learnt[i])]
-		if lvl > bj_level {
-			bj_level = lvl
+		if lvl > backjump_level {
+			backjump_level = lvl
 			max_i = i
 		}
 	}
@@ -544,11 +547,11 @@ analyze :: proc(s: ^Solver, confl: int) -> (learnt: [dynamic]Literal, bj_level: 
 	}
 
 	// clear seen for older level literals. current level literals were already cleared
-	for l in s.analyze_toclear {
+	for l in s.seen_to_clear {
 		s.seen[lit_var(l)] = false
 	}
 
-	return learnt, bj_level
+	return learnt, backjump_level
 }
 
 // bump adds var_inc to activity[v]; if the result exceeds 1e100, it rescales
@@ -574,8 +577,8 @@ compute_lbd :: proc(s: ^Solver, lits: []Literal) -> int {
 		v := lit_var(l)
 		lvl := s.levels[v]
 
-		if !s.level_seen[lvl] {
-			s.level_seen[lvl] = true
+		if !s.lbd_levels[lvl] {
+			s.lbd_levels[lvl] = true
 			lbd += 1
 		}
 	}
@@ -583,7 +586,7 @@ compute_lbd :: proc(s: ^Solver, lits: []Literal) -> int {
 	for l in lits {
 		v := lit_var(l)
 		lvl := s.levels[v]
-		s.level_seen[lvl] = false
+		s.lbd_levels[lvl] = false
 	}
 
 	return lbd
@@ -659,7 +662,7 @@ reduce_db :: proc(s: ^Solver) {
 		delete(s.formula.clauses[ci])
 		s.formula.clauses[ci] = nil
 	}
-	s.deleted += len(victims)
+	s.clauses_deleted += len(victims)
 	s.reductions += 1
 }
 

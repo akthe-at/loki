@@ -23,19 +23,19 @@ lit_from_dimacs :: proc(x: int) -> Literal {
 	}
 }
 
-// lit_var returns the variable of 1, ignoring its sign.
+// lit_var returns the variable of l, ignoring its sign.
 lit_var :: proc(l: Literal) -> Var {
 	result := l / 2
 	return Var(result)
 }
 
-// lit_pos returns the positive of literal v.
+// lit_pos returns the positive literal of variable v.
 lit_pos :: proc(v: Var) -> Literal {
 	return Literal(2 * v)
 }
 
-// lit_neg returns the negation of l.
-lit_neg :: proc(l: Literal) -> Literal {
+// lit_not returns the negation of l: the same variable with the opposite sign.
+lit_not :: proc(l: Literal) -> Literal {
 	return l ~ 1
 }
 

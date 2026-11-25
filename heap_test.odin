@@ -8,7 +8,7 @@ import "core:testing"
 heap_valid :: proc(h: ^Var_Heap, act: []f64) -> bool {
 	for v, i in h.heap {
 		if h.index[v] != i {return false}
-		if i > 0 && before(act, v, h.heap[(i - 1) / 2]) {return false}
+		if i > 0 && heap_before(act, v, h.heap[(i - 1) / 2]) {return false}
 	}
 	return true
 }

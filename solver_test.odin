@@ -180,10 +180,10 @@ analyze_hand_example :: proc(t: ^testing.T) {
 		return
 	}
 
-	learnt, bj_level := analyze(&s, confl)
+	learnt, backjump_level := analyze(&s, confl)
 	defer delete(learnt)
 
-	testing.expect_value(t, bj_level, 1)
+	testing.expect_value(t, backjump_level, 1)
 	if testing.expect_value(t, len(learnt), 2) {
 		testing.expect_value(t, learnt[0], L(-1)) // asserting literal first
 		testing.expect_value(t, learnt[1], L(-4)) // highest-level other literal second
@@ -314,7 +314,7 @@ invariants_after_solve_with_reductions :: proc(t: ^testing.T) {
 
 	testing.expect_value(t, solve(&s), Result.Unsat)
 	testing.expect(t, s.reductions > 0)
-	testing.expect(t, s.deleted > 0)
+	testing.expect(t, s.clauses_deleted > 0)
 
 	// infos and clauses stay the same length
 	testing.expect_value(t, len(s.infos), len(f.clauses))
@@ -639,7 +639,7 @@ propagate_reaches_fixpoint :: proc(t: ^testing.T) {
 			}
 			l := lit_pos(Var(v))
 			if next_random(&rng) % 2 == 0 {
-				l = lit_neg(l)
+				l = lit_not(l)
 			}
 			decide(&s, l)
 		}
