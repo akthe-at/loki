@@ -6,7 +6,7 @@ import "core:strings"
 
 
 // Parse_Error is the reason parsing failed. None (zero value) means
-// success, so callers can test err != nil
+// success, so callers can test err != nil.
 Parse_Error :: enum {
 	None,
 	File_Read,
@@ -17,15 +17,18 @@ Parse_Error :: enum {
 	Unterminated_Clause,
 }
 
-// parses DIMACS CNF text. On success the caller owns the returned formula
+// parse_dimacs_string parses DIMACS CNF text. On success the caller owns the returned formula
 // and frees it with formula_destroy. On error the returned formula is empty.
 parse_dimacs_string :: proc(text: string) -> (f: Formula, err: Parse_Error) {
+	parsed: Formula
 	seen_header := false
 	rest := text
 	current: [dynamic]Literal
 	defer delete(current)
 	// On any error, free the clauses parsed so far.
-	defer if err != nil {formula_destroy(&f)}
+	defer if err != nil {
+		formula_destroy(&parsed)
+	}
 
 	for line in strings.split_lines_iterator(&rest) {
 		if len(line) == 0 || strings.starts_with(line, "c") {
@@ -44,36 +47,36 @@ parse_dimacs_string :: proc(text: string) -> (f: Formula, err: Parse_Error) {
 				count += 1
 				if count == 3 {
 					n, ok := strconv.parse_int(w)
-					if !ok || n < 0 {return f, .Bad_Header}
-					f.num_vars = u32(n)
+					if !ok || n < 0 {return {}, .Bad_Header}
+					parsed.num_vars = u32(n)
 					break
 				}
 			}
-			if count < 3 {return f, .Bad_Header}
+			if count < 3 {return {}, .Bad_Header}
 			seen_header = true
 			continue
 		}
 		// Every line that reaches here is a clause line.
-		if !seen_header {return f, .Missing_Header}
+		if !seen_header {return {}, .Missing_Header}
 
 		words := line
 		for word in strings.fields_iterator(&words) {
 			lit, ok := strconv.parse_int(word)
-			if !ok {return f, .Bad_Literal}
+			if !ok {return {}, .Bad_Literal}
 			if lit == 0 {
 				// finish the current clause
-				append(&f.clauses, current[:])
+				append(&parsed.clauses, current[:])
 				current = {}
 			} else {
-				if abs(lit) > int(f.num_vars) {return f, .Literal_Out_Of_Range}
+				if abs(lit) > int(parsed.num_vars) {return {}, .Literal_Out_Of_Range}
 				append(&current, lit_from_dimacs(lit))
 			}
 		}
 	}
 	if len(current) > 0 {
-		return f, .Unterminated_Clause
+		return {}, .Unterminated_Clause
 	}
-	return f, nil
+	return parsed, nil
 }
 
 // parse_dimacs reads a DIMACS CNF file. On success the caller owns the returned
