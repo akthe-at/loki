@@ -65,6 +65,7 @@ Solver :: struct {
 	level_seen:       []bool,
 	polarity:         []bool,
 	activity:         []f64,
+	order:            Var_Heap, // unassigned variables by activity; see heap.odin
 	var_inc:          f64,
 	//Statistics
 	conflicts:        int,
@@ -110,6 +111,11 @@ solver_init :: proc(f: ^Formula) -> Solver {
 	for &v in s.polarity {
 		v = true
 	}
+	// Every variable starts unassigned, so every variable starts in the heap.
+	heap_init(&s.order, f.num_vars)
+	for v in 0 ..< f.num_vars {
+		heap_insert(&s.order, s.activity, Var(v))
+	}
 	assert(len(s.infos) == len(s.formula.clauses))
 	return s
 }
@@ -131,6 +137,7 @@ solver_destroy :: proc(s: ^Solver) {
 	delete(s.activity)
 	delete(s.infos)
 	delete(s.polarity)
+	heap_destroy(&s.order)
 }
 
 
@@ -242,29 +249,23 @@ backtrack :: proc(s: ^Solver, level: int) {
 			s.polarity[lit_var(l)] = !lit_is_neg(l)
 		}
 		s.values[lit_var(l)] = .Undef
+		// Keep the invariant: every unassigned variable is in the heap.
+		heap_insert(&s.order, s.activity, lit_var(l))
 	}
 	resize(&s.trail_lim, level)
 	s.qhead = target_trail_length
 }
 
 // pick_unassigned returns the unassigned variable with the highest activity,
-// or false if every variable is assigned.
+// or false if every variable is assigned. Ties go to the lower-numbered
+// variable. Assigned variables left in the heap are discarded as they surface.
 @(private)
 pick_unassigned :: proc(s: ^Solver) -> (Var, bool) {
-	best_score := -1.0
-	best_index := -1
-
-	for v, i in s.values {
-		if v != .Undef {
-			continue
+	for len(s.order.heap) > 0 {
+		v := heap_pop_max(&s.order, s.activity)
+		if s.values[v] == .Undef {
+			return v, true
 		}
-		if s.activity[i] > best_score {
-			best_score = s.activity[i]
-			best_index = i
-		}
-	}
-	if best_index != -1 {
-		return Var(best_index), true
 	}
 	return Var(0), false
 }
@@ -459,6 +460,7 @@ analyze :: proc(s: ^Solver, confl: int) -> (learnt: [dynamic]Literal, bj_level: 
 @(private)
 bump :: proc(s: ^Solver, v: Var) {
 	s.activity[v] += s.var_inc
+	heap_increase(&s.order, s.activity, v)
 	if s.activity[v] > 1e100 {
 		// rescale activity and var_inc by 1e-100
 		for &a in s.activity {
