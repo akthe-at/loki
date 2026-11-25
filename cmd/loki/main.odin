@@ -28,9 +28,9 @@ main :: proc() {
 		os.exit(1)
 	}
 
-	f, ok := loki.parse_dimacs(os.args[1])
-	if !ok {
-		fmt.eprintln("Failed to parse DIMACS file")
+	f, err := loki.parse_dimacs(os.args[1])
+	if err != nil {
+		fmt.eprintln("parse error:", err)
 		os.exit(1)
 	}
 	defer loki.formula_destroy(&f)
