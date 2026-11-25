@@ -1,6 +1,7 @@
 #+private
 package loki
 
+import "core:slice"
 import "core:strings"
 import "core:testing"
 
@@ -273,10 +274,20 @@ invariants_after_solve_with_reductions :: proc(t: ^testing.T) {
 	// infos and clauses stay the same length
 	testing.expect_value(t, len(s.infos), len(f.clauses))
 
-	// no watch list points at a deleted clause
+	// every watch entry: live clause, filed under one of its two watched
+	// literals, blocker taken from the clause, binary flag matching its length
 	for ws, lit in s.watches {
-		for ci in ws {
-			testing.expectf(t, !s.infos[ci].deleted, "watches[%d] holds deleted clause %d", lit, ci)
+		for w in ws {
+			if !testing.expectf(t, !s.infos[w.ci].deleted, "watches[%d] holds deleted clause %d", lit, w.ci) {
+				continue
+			}
+			c := f.clauses[w.ci]
+			testing.expectf(t, c[0] == Literal(lit) || c[1] == Literal(lit), "watches[%d] holds clause %d, which doesn't watch it", lit, w.ci)
+			testing.expectf(t, slice.contains(c, w.blocker), "watches[%d]: clause %d's blocker %d is not in the clause", lit, w.ci, w.blocker)
+			// an entry filed under x is visited only when x is false, so x
+			// itself could never let it skip
+			testing.expectf(t, w.blocker != Literal(lit), "watches[%d]: clause %d uses its own literal as blocker", lit, w.ci)
+			testing.expectf(t, w.binary == (len(c) == 2), "watches[%d]: clause %d has binary=%v but %d literals", lit, w.ci, w.binary, len(c))
 		}
 	}
 
@@ -333,6 +344,243 @@ pigeonhole :: proc(pigeons, holes: int) -> string {
 				strings.write_string(&b, " 0\n")
 			}
 		}
+	}
+	return strings.to_string(b)
+}
+
+// Lesson 11c: watch entries with blocking literals.
+
+// A binary clause whose blocker is true is skipped without being loaded, so
+// nothing is assigned and its literal order is untouched (a load would have
+// normalised it to [2, 1]).
+@(test)
+propagate_binary_blocker_true :: proc(t: ^testing.T) {
+	f, s := fixture(t, "p cnf 2 1\n1 2 0\n")
+	defer teardown(f, &s)
+
+	decide(&s, L(2))
+	decide(&s, L(-1)) // visits watches[x1]; its blocker x2 is true
+	testing.expect_value(t, propagate(&s), NO_REASON)
+
+	testing.expect_value(t, len(s.trail), 2)
+	testing.expect_value(t, f.clauses[0][0], L(1))
+	testing.expect_value(t, f.clauses[0][1], L(2))
+}
+
+// A binary clause whose blocker is unassigned implies it, and the reason
+// clause has the implied literal in slot 0 (analyze skips c[0], locked
+// tests it).
+@(test)
+propagate_binary_blocker_unassigned :: proc(t: ^testing.T) {
+	f, s := fixture(t, "p cnf 2 1\n1 2 0\n")
+	defer teardown(f, &s)
+
+	decide(&s, L(-1))
+	testing.expect_value(t, propagate(&s), NO_REASON)
+
+	testing.expect_value(t, s.values[1], LBool.True)
+	testing.expect_value(t, s.reasons[1], 0)
+	testing.expect_value(t, f.clauses[0][0], L(2))
+	testing.expect_value(t, f.clauses[0][1], L(1))
+	testing.expect(t, locked(&s, 0))
+}
+
+// A binary clause whose blocker is false is a conflict.
+@(test)
+propagate_binary_blocker_false :: proc(t: ^testing.T) {
+	f, s := fixture(t, "p cnf 2 1\n1 2 0\n")
+	defer teardown(f, &s)
+
+	// assign both without propagating in between, so the blocker is already
+	// false when watches[x1] is visited
+	decide(&s, L(-2))
+	decide(&s, L(-1))
+	s.qhead = 1 // x2's own watch list has been handled; x1's has not
+	testing.expect_value(t, propagate(&s), 0)
+}
+
+// The blocker of a long clause goes stale when the other watch moves. A true
+// stale blocker still skips the clause: the watch stays where it is. (Without
+// the blocker, the visit would load the clause and move the watch to x2.)
+@(test)
+propagate_stale_blocker_true_skips :: proc(t: ^testing.T) {
+	f, s := fixture(t, "p cnf 4 1\n1 2 3 4 0\n")
+	defer teardown(f, &s)
+
+	// ¬x2 moves the x2 watch to x3. watches[x1] keeps blocker x2: now stale.
+	decide(&s, L(-2))
+	testing.expect_value(t, propagate(&s), NO_REASON)
+	testing.expect_value(t, len(s.watches[L(3)]), 1)
+	backtrack(&s, 0)
+
+	decide(&s, L(2)) // the stale blocker is true now
+	testing.expect_value(t, propagate(&s), NO_REASON)
+	decide(&s, L(-1))
+	testing.expect_value(t, propagate(&s), NO_REASON)
+
+	testing.expect_value(t, len(s.watches[L(1)]), 1)
+	testing.expect_value(t, len(s.watches[L(2)]), 0)
+	testing.expect_value(t, len(s.watches[L(3)]), 1)
+}
+
+// A long clause whose blocker is false is loaded; when c[0] turns out to be
+// true, the clause is skipped and the entry's blocker becomes c[0].
+@(test)
+propagate_refreshes_blocker_when_c0_true :: proc(t: ^testing.T) {
+	f, s := fixture(t, "p cnf 4 1\n1 2 3 4 0\n")
+	defer teardown(f, &s)
+
+	decide(&s, L(-2)) // x2 watch moves to x3; watches[x1] keeps blocker x2
+	testing.expect_value(t, propagate(&s), NO_REASON)
+	decide(&s, L(3))
+	testing.expect_value(t, propagate(&s), NO_REASON)
+	decide(&s, L(-1)) // blocker x2 is false: load; c[0] = x3 is true
+	testing.expect_value(t, propagate(&s), NO_REASON)
+
+	testing.expect_value(t, len(s.trail), 3) // nothing implied
+	if testing.expect_value(t, len(s.watches[L(1)]), 1) {
+		testing.expect_value(t, s.watches[L(1)][0].blocker, L(3))
+	}
+}
+
+// A long clause that becomes unit through an entry with a stale blocker
+// assigns c[0], and the entry's blocker becomes c[0].
+@(test)
+propagate_refreshes_blocker_when_unit :: proc(t: ^testing.T) {
+	f, s := fixture(t, "p cnf 4 1\n1 2 3 4 0\n")
+	defer teardown(f, &s)
+
+	decide(&s, L(-2)) // x2 watch moves to x3; watches[x1] keeps blocker x2
+	testing.expect_value(t, propagate(&s), NO_REASON)
+	decide(&s, L(-4))
+	testing.expect_value(t, propagate(&s), NO_REASON)
+	decide(&s, L(-1)) // only x3 is left
+	testing.expect_value(t, propagate(&s), NO_REASON)
+
+	testing.expect_value(t, s.values[2], LBool.True)
+	testing.expect_value(t, s.reasons[2], 0)
+	testing.expect_value(t, f.clauses[0][0], L(3))
+	if testing.expect_value(t, len(s.watches[L(1)]), 1) {
+		testing.expect_value(t, s.watches[L(1)][0].blocker, L(3))
+	}
+}
+
+// propagation_complete reports whether propagate reached a fixpoint: every
+// clause is satisfied or still has two literals that aren't false. A clause
+// with one non-false literal is a missed unit; with none, a missed conflict.
+@(private = "file")
+propagation_complete :: proc(s: ^Solver) -> bool {
+	for c, ci in s.formula.clauses {
+		if s.infos[ci].deleted || len(c) < 2 {
+			continue
+		}
+		open := 0
+		for l in c {
+			v := lit_value(s, l)
+			if v == .True {
+				open = 2
+				break
+			}
+			if v == .Undef {
+				open += 1
+			}
+		}
+		if open < 2 {
+			return false
+		}
+	}
+	return true
+}
+
+// Random decisions and backtracks on random 3-SAT and pigeonhole formulas.
+// After every propagate that finds no conflict, nothing may be left to
+// propagate. This is what catches a blocker that isn't in its clause: the
+// answers stay right, because the clause's other watch still finds conflicts
+// late, but units get missed.
+@(test)
+propagate_reaches_fixpoint :: proc(t: ^testing.T) {
+	texts := [?]string{random_3sat(60, 255, 1), random_3sat(60, 255, 2), random_3sat(100, 420, 3), pigeonhole(6, 5)}
+	defer for text in texts {
+		delete(text)
+	}
+
+	for text, n in texts {
+		f, s := fixture(t, text)
+		defer teardown(f, &s)
+		rng := u64(n + 1)
+
+		for _ in 0 ..< 3000 {
+			if propagate(&s) != NO_REASON {
+				if decision_level(&s) == 0 {
+					break
+				}
+				backtrack(&s, decision_level(&s) - 1)
+				continue
+			}
+			if !testing.expectf(t, propagation_complete(&s), "formula %d: missed propagation at level %d", n, decision_level(&s)) {
+				break
+			}
+			// pick a random unassigned variable and a random sign
+			nv := int(f.num_vars)
+			start := int(next_random(&rng) % u64(nv))
+			v := -1
+			for k in 0 ..< nv {
+				if s.values[(start + k) % nv] == .Undef {
+					v = (start + k) % nv
+					break
+				}
+			}
+			if v < 0 {
+				backtrack(&s, 0) // everything assigned: start over
+				continue
+			}
+			l := lit_pos(Var(v))
+			if next_random(&rng) % 2 == 0 {
+				l = lit_neg(l)
+			}
+			decide(&s, l)
+		}
+	}
+}
+
+// next_random is a small xorshift generator, so the test is the same every run.
+@(private = "file")
+next_random :: proc(state: ^u64) -> u64 {
+	x := state^ * 0x9E3779B97F4A7C15 + 1
+	x ~= x >> 31
+	x ~= x << 17
+	x ~= x >> 23
+	state^ = x
+	return x
+}
+
+// random_3sat writes a random 3-SAT formula as DIMACS text; the caller deletes it.
+@(private = "file")
+random_3sat :: proc(num_vars, num_clauses: int, seed: u64) -> string {
+	rng := seed
+	b := strings.builder_make()
+	strings.write_string(&b, "p cnf ")
+	strings.write_int(&b, num_vars)
+	strings.write_string(&b, " ")
+	strings.write_int(&b, num_clauses)
+	strings.write_string(&b, "\n")
+	for _ in 0 ..< num_clauses {
+		vars: [3]int
+		for k in 0 ..< 3 {
+			for {
+				vars[k] = int(next_random(&rng) % u64(num_vars)) + 1
+				if k == 0 || (vars[k] != vars[0] && (k == 1 || vars[k] != vars[1])) {
+					break
+				}
+			}
+			x := vars[k]
+			if next_random(&rng) % 2 == 0 {
+				x = -x
+			}
+			strings.write_int(&b, x)
+			strings.write_string(&b, " ")
+		}
+		strings.write_string(&b, "0\n")
 	}
 	return strings.to_string(b)
 }
