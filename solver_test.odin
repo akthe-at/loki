@@ -70,7 +70,12 @@ backtrack_undoes_levels_and_saves_phases :: proc(t: ^testing.T) {
 	for v in 1 ..< 4 {
 		testing.expectf(t, s.values[v] == .Undef, "var %d still assigned after backtrack", v)
 		// invariant from Lesson 11b: every unassigned variable is in the heap
-		testing.expectf(t, heap_contains(&s.order, Var(v)), "unassigned var %d missing from heap", v)
+		testing.expectf(
+			t,
+			heap_contains(&s.order, Var(v)),
+			"unassigned var %d missing from heap",
+			v,
+		)
 	}
 	// saved phases: the sign each variable had when it was unassigned
 	testing.expect_value(t, s.polarity[1], false) // was ¬x2
@@ -132,7 +137,13 @@ propagate_reports_conflict :: proc(t: ^testing.T) {
 		return
 	}
 	for l in f.clauses[confl] {
-		testing.expectf(t, lit_value(&s, l) == .False, "conflict clause %d has non-false literal %d", confl, l)
+		testing.expectf(
+			t,
+			lit_value(&s, l) == .False,
+			"conflict clause %d has non-false literal %d",
+			confl,
+			l,
+		)
 	}
 }
 
@@ -207,7 +218,14 @@ pick_matches_linear_scan :: proc(t: ^testing.T) {
 		want, want_ok := scan_unassigned(&s)
 		got, ok := pick_unassigned(&s)
 		testing.expect_value(t, ok, want_ok)
-		if !testing.expectf(t, got == want, "round %d: heap picked %d, scan picks %d", round, got, want) {
+		if !testing.expectf(
+			t,
+			got == want,
+			"round %d: heap picked %d, scan picks %d",
+			round,
+			got,
+			want,
+		) {
 			return
 		}
 		decide(&s, lit_pos(got))
@@ -233,17 +251,44 @@ scan_unassigned :: proc(s: ^Solver) -> (Var, bool) {
 // Of those, the worst half by LBD goes.
 @(test)
 collect_victims_rules :: proc(t: ^testing.T) {
-	f, s := fixture(t, "p cnf 16 8\n1 2 0\n3 4 0\n5 6 0\n7 8 0\n9 10 0\n11 12 0\n13 14 0\n15 16 0\n")
+	f, s := fixture(
+		t,
+		"p cnf 16 8\n1 2 0\n3 4 0\n5 6 0\n7 8 0\n9 10 0\n11 12 0\n13 14 0\n15 16 0\n",
+	)
 	defer teardown(f, &s)
 
-	s.infos[0] = {learned = false, lbd = 10} // original clause: never deleted
-	s.infos[1] = {learned = true, lbd = 2} // glue: kept
-	s.infos[2] = {learned = true, lbd = 3}
-	s.infos[3] = {learned = true, lbd = 4}
-	s.infos[4] = {learned = true, lbd = 5}
-	s.infos[5] = {learned = true, lbd = 6}
-	s.infos[6] = {learned = true, lbd = 9} // locked below: kept
-	s.infos[7] = {learned = true, lbd = 7}
+	s.infos[0] = {
+		learned = false,
+		lbd     = 10,
+	} // original clause: never deleted
+	s.infos[1] = {
+		learned = true,
+		lbd     = 2,
+	} // glue: kept
+	s.infos[2] = {
+		learned = true,
+		lbd     = 3,
+	}
+	s.infos[3] = {
+		learned = true,
+		lbd     = 4,
+	}
+	s.infos[4] = {
+		learned = true,
+		lbd     = 5,
+	}
+	s.infos[5] = {
+		learned = true,
+		lbd     = 6,
+	}
+	s.infos[6] = {
+		learned = true,
+		lbd     = 9,
+	} // locked below: kept
+	s.infos[7] = {
+		learned = true,
+		lbd     = 7,
+	}
 	assign(&s, f.clauses[6][0], 6) // clause 6 is now the reason for x13
 
 	// deletable: clauses 2, 3, 4, 5, 7. Half of 5 is 2: the worst two by LBD.
@@ -278,16 +323,49 @@ invariants_after_solve_with_reductions :: proc(t: ^testing.T) {
 	// literals, blocker taken from the clause, binary flag matching its length
 	for ws, lit in s.watches {
 		for w in ws {
-			if !testing.expectf(t, !s.infos[w.ci].deleted, "watches[%d] holds deleted clause %d", lit, w.ci) {
+			if !testing.expectf(
+				t,
+				!s.infos[w.ci].deleted,
+				"watches[%d] holds deleted clause %d",
+				lit,
+				w.ci,
+			) {
 				continue
 			}
 			c := f.clauses[w.ci]
-			testing.expectf(t, c[0] == Literal(lit) || c[1] == Literal(lit), "watches[%d] holds clause %d, which doesn't watch it", lit, w.ci)
-			testing.expectf(t, slice.contains(c, w.blocker), "watches[%d]: clause %d's blocker %d is not in the clause", lit, w.ci, w.blocker)
+			testing.expectf(
+				t,
+				c[0] == Literal(lit) || c[1] == Literal(lit),
+				"watches[%d] holds clause %d, which doesn't watch it",
+				lit,
+				w.ci,
+			)
+			testing.expectf(
+				t,
+				slice.contains(c, w.blocker),
+				"watches[%d]: clause %d's blocker %d is not in the clause",
+				lit,
+				w.ci,
+				w.blocker,
+			)
 			// an entry filed under x is visited only when x is false, so x
 			// itself could never let it skip
-			testing.expectf(t, w.blocker != Literal(lit), "watches[%d]: clause %d uses its own literal as blocker", lit, w.ci)
-			testing.expectf(t, w.binary == (len(c) == 2), "watches[%d]: clause %d has binary=%v but %d literals", lit, w.ci, w.binary, len(c))
+			testing.expectf(
+				t,
+				w.blocker != Literal(lit),
+				"watches[%d]: clause %d uses its own literal as blocker",
+				lit,
+				w.ci,
+			)
+			testing.expectf(
+				t,
+				w.binary == (len(c) == 2),
+				"watches[%d]: clause %d has binary=%v but %d literals",
+				lit,
+				w.ci,
+				w.binary,
+				len(c),
+			)
 		}
 	}
 
@@ -295,11 +373,25 @@ invariants_after_solve_with_reductions :: proc(t: ^testing.T) {
 		c := f.clauses[ci]
 		if info.deleted {
 			// only learned, non-glue clauses are ever deleted
-			testing.expectf(t, info.learned && info.lbd > 2, "clause %d deleted but learned=%v lbd=%d", ci, info.learned, info.lbd)
+			testing.expectf(
+				t,
+				info.learned && info.lbd > 2,
+				"clause %d deleted but learned=%v lbd=%d",
+				ci,
+				info.learned,
+				info.lbd,
+			)
 			testing.expectf(t, c == nil, "deleted clause %d not freed", ci)
 		} else if info.learned {
 			// LBD counts distinct levels: at least 1, at most one per literal
-			testing.expectf(t, 1 <= info.lbd && info.lbd <= len(c), "clause %d: lbd %d, %d literals", ci, info.lbd, len(c))
+			testing.expectf(
+				t,
+				1 <= info.lbd && info.lbd <= len(c),
+				"clause %d: lbd %d, %d literals",
+				ci,
+				info.lbd,
+				len(c),
+			)
 		}
 	}
 
@@ -499,7 +591,12 @@ propagation_complete :: proc(s: ^Solver) -> bool {
 // late, but units get missed.
 @(test)
 propagate_reaches_fixpoint :: proc(t: ^testing.T) {
-	texts := [?]string{random_3sat(60, 255, 1), random_3sat(60, 255, 2), random_3sat(100, 420, 3), pigeonhole(6, 5)}
+	texts := [?]string {
+		random_3sat(60, 255, 1),
+		random_3sat(60, 255, 2),
+		random_3sat(100, 420, 3),
+		pigeonhole(6, 5),
+	}
 	defer for text in texts {
 		delete(text)
 	}
@@ -517,7 +614,13 @@ propagate_reaches_fixpoint :: proc(t: ^testing.T) {
 				backtrack(&s, decision_level(&s) - 1)
 				continue
 			}
-			if !testing.expectf(t, propagation_complete(&s), "formula %d: missed propagation at level %d", n, decision_level(&s)) {
+			if !testing.expectf(
+				t,
+				propagation_complete(&s),
+				"formula %d: missed propagation at level %d",
+				n,
+				decision_level(&s),
+			) {
 				break
 			}
 			// pick a random unassigned variable and a random sign

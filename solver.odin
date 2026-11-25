@@ -34,6 +34,13 @@ Restart_Schedule :: enum {
 	Luby,
 }
 
+// Minimize_Mode
+Minimize_Mode :: enum {
+	None,
+	Local,
+	Recursive,
+}
+
 @(private)
 Watch :: struct {
 	ci:      int,
@@ -57,9 +64,10 @@ Victim_Candidate :: struct {
 
 // Solver holds the state of one CDCL search over a Formula.
 //
-// Settings (set after solver_init, before solve):
-// 	phase_saving, restart_schedule, restart_unit, reduce_first, reduce_inc.
-// Statistics (read after solve): conflicts, decisions, restarts, deleted, reductions.
+// Settings (set after solver_init, before solve): phase_saving,
+// restart_schedule, restart_unit, reduce_first, reduce_inc, and minimize.
+// Statistics (read after solve): conflicts, decisions, restarts, deleted,
+// reductions, max_literals, and tot_literals.
 // prop_time, pick_time and analyze_time are filled in only in LOKI_PROFILE builds.
 // On .Sat, values hold the assignment.
 // All other fields are internal.
@@ -67,8 +75,9 @@ Solver :: struct {
 	// Internal
 	formula:          ^Formula,
 	values:           []LBool,
+	analyze_toclear:    [dynamic]Literal,
 	trail:            [dynamic]Literal,
-	trail_lim:        [dynamic]int,
+	trail_lim:     [dynamic]int,
 	infos:            [dynamic]Clause_Info,
 	watches:          [][dynamic]Watch,
 	qhead:            int,
@@ -84,8 +93,10 @@ Solver :: struct {
 	conflicts:        int,
 	decisions:        int,
 	restarts:         int,
-	deleted:          int,
+	deleted:  int,
 	reductions:       int,
+	max_literals:     int,
+	tot_literals:     int,
 	prop_time:        time.Duration,
 	pick_time:        time.Duration,
 	analyze_time:     time.Duration,
@@ -95,6 +106,7 @@ Solver :: struct {
 	restart_unit:     int,
 	reduce_first:     int,
 	reduce_inc:       int,
+	minimize:         Minimize_Mode,
 }
 
 // solver_init creates a solver for f. The solver keeps a pointer to f, so f
@@ -106,6 +118,7 @@ solver_init :: proc(f: ^Formula) -> Solver {
 		reduce_first     = 2000,
 		reduce_inc       = 300,
 		restart_schedule = .Geometric,
+		minimize         = .Local,
 		restart_unit     = 100,
 		phase_saving     = true,
 		watches          = make([][dynamic]Watch, 2 * f.num_vars),
@@ -152,6 +165,7 @@ solver_destroy :: proc(s: ^Solver) {
 	delete(s.activity)
 	delete(s.infos)
 	delete(s.polarity)
+	delete(s.analyze_toclear)
 	heap_destroy(&s.order)
 }
 
@@ -482,6 +496,38 @@ analyze :: proc(s: ^Solver, confl: int) -> (learnt: [dynamic]Literal, bj_level: 
 	// after backjumping, all other learnt literals are still false, so the
 	// clause propagates lit_neg(p)
 	learnt[0] = lit_neg(p)
+	clear(&s.analyze_toclear)
+	append(&s.analyze_toclear, ..learnt[1:])
+	s.max_literals += len(learnt)
+	switch s.minimize {
+	case .None:
+	// Nothing: keep the clause as it is
+	case .Local:
+		j := 1
+		for i in 1 ..< len(learnt) {
+			v := lit_var(learnt[i])
+			keep := s.reasons[v] == NO_REASON
+			if !keep {
+				c := s.formula.clauses[s.reasons[v]]
+				for k in 1 ..< len(c) {
+					u := lit_var(c[k])
+					if !s.seen[u] && s.levels[u] > 0 {
+						keep = true
+						break
+					}
+				}
+			}
+			if keep {
+				learnt[j] = learnt[i]
+				j += 1
+			}
+		}
+		resize(&learnt, j)
+	case .Recursive: // Still nothing for now...until part2
+	}
+
+
+	s.tot_literals += len(learnt)
 
 	// backjump level = highest level among learnt[1:], move that literal into slot 1
 	bj_level = 0
@@ -498,8 +544,8 @@ analyze :: proc(s: ^Solver, confl: int) -> (learnt: [dynamic]Literal, bj_level: 
 	}
 
 	// clear seen for older level literals. current level literals were already cleared
-	for i in 1 ..< len(learnt) {
-		s.seen[lit_var(learnt[i])] = false
+	for l in s.analyze_toclear {
+		s.seen[lit_var(l)] = false
 	}
 
 	return learnt, bj_level

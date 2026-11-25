@@ -15,7 +15,14 @@ lit_from_dimacs_cases :: proc(t: ^testing.T) {
 
 	for c in cases {
 		got := loki.lit_from_dimacs(c.dimacs)
-		testing.expectf(t, got == c.want, "lit_from_dimacs(%d) = %d, want %d", c.dimacs, got, c.want)
+		testing.expectf(
+			t,
+			got == c.want,
+			"lit_from_dimacs(%d) = %d, want %d",
+			c.dimacs,
+			got,
+			c.want,
+		)
 	}
 }
 
@@ -25,8 +32,22 @@ lit_var_and_sign :: proc(t: ^testing.T) {
 	for x in ([]int{1, -1, 2, -2, 7, -7, 250, -250}) {
 		l := loki.lit_from_dimacs(x)
 		want_var := loki.Var(abs(x) - 1)
-		testing.expectf(t, loki.lit_var(l) == want_var, "lit_var(lit(%d)) = %d, want %d", x, loki.lit_var(l), want_var)
-		testing.expectf(t, loki.lit_is_neg(l) == (x < 0), "lit_is_neg(lit(%d)) = %v, want %v", x, loki.lit_is_neg(l), x < 0)
+		testing.expectf(
+			t,
+			loki.lit_var(l) == want_var,
+			"lit_var(lit(%d)) = %d, want %d",
+			x,
+			loki.lit_var(l),
+			want_var,
+		)
+		testing.expectf(
+			t,
+			loki.lit_is_neg(l) == (x < 0),
+			"lit_is_neg(lit(%d)) = %v, want %v",
+			x,
+			loki.lit_is_neg(l),
+			x < 0,
+		)
 	}
 }
 
@@ -45,7 +66,13 @@ lit_pos_cases :: proc(t: ^testing.T) {
 lit_neg_cases :: proc(t: ^testing.T) {
 	for x in ([]int{1, -1, 3, -3, 250, -250}) {
 		l := loki.lit_from_dimacs(x)
-		testing.expectf(t, loki.lit_neg(loki.lit_neg(l)) == l, "lit_neg(lit_neg(lit(%d))) != lit(%d)", x, x)
+		testing.expectf(
+			t,
+			loki.lit_neg(loki.lit_neg(l)) == l,
+			"lit_neg(lit_neg(lit(%d))) != lit(%d)",
+			x,
+			x,
+		)
 		testing.expectf(
 			t,
 			loki.lit_neg(l) == loki.lit_from_dimacs(-x),

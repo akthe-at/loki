@@ -49,6 +49,22 @@ main :: proc() {
 		s.phase_saving = false
 	}
 	fmt.println("phase saving:", "on" if s.phase_saving else "off")
+
+	// LOKI_MINIMIZE
+	if value, found := os.lookup_env("LOKI_MINIMIZE", context.temp_allocator);
+	   found && value == "local" {
+		s.minimize = .Local
+	}
+	if value, found := os.lookup_env("LOKI_MINIMIZE", context.temp_allocator);
+	   found && value == "none" {
+		s.minimize = .None
+	}
+	if value, found := os.lookup_env("LOKI_MINIMIZE", context.temp_allocator);
+	   found && value == "recursive" {
+		s.minimize = .Recursive
+	}
+	fmt.println("minimize:", s.minimize)
+
 	// LOKI_RESTARTS
 	if value, found := os.lookup_env("LOKI_RESTARTS", context.temp_allocator);
 	   found && value == "luby" {
@@ -93,7 +109,11 @@ main :: proc() {
 			name: string,
 			d:    time.Duration,
 		}
-		rows := [?]Row{{"propagate", s.prop_time}, {"pick_unassigned", s.pick_time}, {"analyze", s.analyze_time}}
+		rows := [?]Row {
+			{"propagate", s.prop_time},
+			{"pick_unassigned", s.pick_time},
+			{"analyze", s.analyze_time},
+		}
 		for row in rows {
 			ms := time.duration_milliseconds(row.d)
 			fmt.printf("  %-16s %8.1f ms  %5.1f%%\n", row.name, ms, 100 * ms / total)
@@ -106,6 +126,11 @@ main :: proc() {
 	fmt.println("deleted:", s.deleted)
 	fmt.println("alive:", learned - s.deleted)
 	fmt.println("reductions:", s.reductions)
+	// Learned-clause literals left after minimization, and the share removed
+	// (MiniSat's "conflict literals ... % deleted").
+	pct_deleted :=
+		100 * f64(s.max_literals - s.tot_literals) / f64(s.max_literals) if s.max_literals > 0 else 0
+	fmt.printf("conflict literals: %d (%.2f%% deleted)\n", s.tot_literals, pct_deleted)
 
 	// Clause quality: average LBD and glue count (LBD <= 2) over learned clauses.
 	n_learned, lbd_sum, glue := 0, 0, 0
