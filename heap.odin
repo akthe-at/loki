@@ -8,16 +8,17 @@ Var_Heap :: struct {
 }
 
 
-heap_init :: proc(h: ^Var_Heap, num_vars: u32) {
-	h.index = make([]int, num_vars)
+heap_init :: proc(h: ^Var_Heap, num_vars: u32, allocator := context.allocator) {
+	h.heap = make([dynamic]Var, allocator)
+	h.index = make([]int, num_vars, allocator)
 	for &i in h.index {
 		i = -1
 	}
 }
 
 heap_destroy :: proc(h: ^Var_Heap) {
+	delete(h.index, h.heap.allocator)
 	delete(h.heap)
-	delete(h.index)
 }
 
 heap_contains :: proc(h: ^Var_Heap, v: Var) -> bool {
@@ -30,7 +31,7 @@ heap_before :: proc(act: []f64, a, b: Var) -> bool {
 	return act[a] > act[b] || (act[a] == act[b] && a < b)
 }
 
-sift_up :: proc(h: ^Var_Heap, act: []f64, i: int) {
+heap_sift_up :: proc(h: ^Var_Heap, act: []f64, i: int) {
 	i := i
 	// take v out -- position i is now a "hole"
 	v := h.heap[i]
@@ -51,7 +52,7 @@ sift_up :: proc(h: ^Var_Heap, act: []f64, i: int) {
 	h.index[v] = i
 }
 
-sift_down :: proc(h: ^Var_Heap, act: []f64, i: int) {
+heap_sift_down :: proc(h: ^Var_Heap, act: []f64, i: int) {
 	i := i
 	v := h.heap[i]
 	n := len(h.heap)
@@ -81,14 +82,14 @@ heap_insert :: proc(h: ^Var_Heap, act: []f64, v: Var) {
 	}
 	// v goes in the last slot, then rises to where it belongs.
 	append(&h.heap, v)
-	sift_up(h, act, len(h.heap) - 1)
+	heap_sift_up(h, act, len(h.heap) - 1)
 }
 
 // heap_increase restores the heap after v's activity went up.
 // It does nothing if v is not in the heap.
 heap_increase :: proc(h: ^Var_Heap, act: []f64, v: Var) {
 	if heap_contains(h, v) {
-		sift_up(h, act, h.index[v])
+		heap_sift_up(h, act, h.index[v])
 	}
 }
 
@@ -102,7 +103,7 @@ heap_pop_max :: proc(h: ^Var_Heap, act: []f64) -> Var {
 	if len(h.heap) > 0 {
 		h.heap[0] = last
 		h.index[last] = 0
-		sift_down(h, act, 0)
+		heap_sift_down(h, act, 0)
 	}
 	return top
 }

@@ -31,12 +31,13 @@ main :: proc() {
 	}
 
 	loki.add_clause(&m, loki.lit_not(works[0][1])) // A doesn't work nights.
-	for shift in works[2] { 	// C is on leave.
-		loki.add_clause(&m, loki.lit_not(shift))
+	// C is on leave.
+	for works_shift in works[2] {
+		loki.add_clause(&m, loki.lit_not(works_shift))
 	}
 	if b_on_leave {
-		for shift in works[1] {
-			loki.add_clause(&m, loki.lit_not(shift))
+		for works_shift in works[1] {
+			loki.add_clause(&m, loki.lit_not(works_shift))
 		}
 	}
 

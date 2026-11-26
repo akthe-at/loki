@@ -32,7 +32,7 @@ bench_files_self_check :: proc(t: ^testing.T) {
 				continue
 			}
 			n_original := len(f.clauses)
-			s := loki.solver_init(&f)
+			s := loki.solver_make(&f)
 			defer loki.solver_destroy(&s)
 
 			result := loki.solve(&s)

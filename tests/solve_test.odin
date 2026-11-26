@@ -2,6 +2,7 @@ package tests
 
 import loki ".."
 import "core:fmt"
+import "core:mem"
 import "core:strings"
 import "core:testing"
 
@@ -22,7 +23,7 @@ solve_text :: proc(
 	}
 	n_original := len(f.clauses)
 
-	s := loki.solver_init(&f)
+	s := loki.solver_make(&f)
 	defer loki.solver_destroy(&s)
 	s.phase_saving = phase_saving
 	s.restart_schedule = restarts
@@ -141,4 +142,33 @@ pigeonhole_dimacs :: proc(pigeons, holes: int) -> string {
 		}
 	}
 	return strings.to_string(b)
+}
+
+@(test)
+custom_allocator_owns_everything :: proc(t: ^testing.T) {
+	// Parse and solve with a tracking allocator that is not context.allocator.
+	// Every allocation the formula and solver keep, including learned clauses and
+	// the ones reduce_db deletes, must come from it and be freed back to it.
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	alloc := mem.tracking_allocator(&track)
+
+	// Pigeonhole 6 into 5: Unsat, with enough conflicts to learn and delete clauses.
+	text := pigeonhole_dimacs(6, 5)
+	defer delete(text)
+
+	f, err := loki.parse_dimacs_string(text, alloc)
+	testing.expect_value(t, err, loki.Parse_Error.None)
+	s := loki.solver_make(&f, alloc)
+	s.reduce_first = 20 // reduce early and often
+	s.reduce_inc = 10
+	testing.expect_value(t, loki.solve(&s), loki.Result.Unsat)
+	testing.expect(t, s.clauses_deleted > 0, "reduce_db never deleted a clause")
+	loki.solver_destroy(&s)
+	loki.formula_destroy(&f)
+
+	testing.expect(t, track.total_allocation_count > 0, "nothing went through the custom allocator")
+	testing.expectf(t, len(track.allocation_map) == 0, "%d allocations leaked", len(track.allocation_map))
+	testing.expectf(t, len(track.bad_free_array) == 0, "%d bad frees", len(track.bad_free_array))
 }

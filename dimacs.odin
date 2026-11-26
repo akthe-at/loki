@@ -17,13 +17,22 @@ Parse_Error :: enum {
 	Unterminated_Clause,
 }
 
-// parse_dimacs_string parses DIMACS CNF text. On success the caller owns the returned formula
-// and frees it with formula_destroy. On error the returned formula is empty.
-parse_dimacs_string :: proc(text: string) -> (f: Formula, err: Parse_Error) {
-	parsed: Formula
+// parse_dimacs_string parses DIMACS CNF text. The clauses are allocated with
+// allocator. On success the caller owns the returned formula and frees it with
+// formula_destroy. On error the returned formula is empty.
+parse_dimacs_string :: proc(
+	text: string,
+	allocator := context.allocator,
+) -> (
+	f: Formula,
+	err: Parse_Error,
+) {
+	parsed := Formula {
+		clauses = make([dynamic]Clause, allocator),
+	}
 	seen_header := false
 	rest := text
-	current: [dynamic]Literal
+	current := make([dynamic]Literal, allocator)
 	defer delete(current)
 	// On any error, free the clauses parsed so far.
 	defer if err != nil {
@@ -66,7 +75,7 @@ parse_dimacs_string :: proc(text: string) -> (f: Formula, err: Parse_Error) {
 			if lit == 0 {
 				// finish the current clause
 				append(&parsed.clauses, current[:])
-				current = {}
+				current = make([dynamic]Literal, allocator)
 			} else {
 				if abs(lit) > int(parsed.num_vars) {return {}, .Literal_Out_Of_Range}
 				append(&current, lit_from_dimacs(lit))
@@ -79,14 +88,15 @@ parse_dimacs_string :: proc(text: string) -> (f: Formula, err: Parse_Error) {
 	return parsed, nil
 }
 
-// parse_dimacs reads a DIMACS CNF file. On success the caller owns the returned
-// formula and must free it with formula_destroy. On error the returned formula is empty.
-parse_dimacs :: proc(path: string) -> (f: Formula, err: Parse_Error) {
+// parse_dimacs reads a DIMACS CNF file. The clauses are allocated with allocator.
+// On success the caller owns the returned formula and frees it with
+// formula_destroy. On error the returned formula is empty.
+parse_dimacs :: proc(path: string, allocator := context.allocator) -> (f: Formula, err: Parse_Error) {
 	data, read_error := os.read_entire_file(path, context.allocator)
 	if read_error != nil {
 		return {}, .File_Read
 	}
 	defer delete(data)
 
-	return parse_dimacs_string(string(data))
+	return parse_dimacs_string(string(data), allocator)
 }

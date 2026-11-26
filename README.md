@@ -78,7 +78,7 @@ main :: proc() {
 }
 ```
 
-If you want more control (settings like restarts, phase saving or clause minimization, or stats after the solve), use `parse_dimacs` + `solver_init` + `solve` directly. `api.odin` shows how they fit together.
+If you want more control (settings like restarts, phase saving or clause minimization, or stats after the solve), use `parse_dimacs` + `solver_make` + `solve` directly. `api.odin` shows how they fit together.
 
 ### tests and benchmarks
 

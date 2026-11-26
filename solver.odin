@@ -1,5 +1,6 @@
 package loki
 
+import "base:runtime"
 import "core:slice"
 import "core:time"
 
@@ -11,7 +12,7 @@ LOKI_PROFILE :: #config(LOKI_PROFILE, false)
 @(private)
 NO_REASON :: -1
 
-// The Lifted Boolean type is used to represent a boolean value that can also be undefined.
+// LBool is a lifted Boolean: True, False, or Undef (the zero value, unassigned).
 LBool :: enum u8 {
 	Undef,
 	True,
@@ -67,16 +68,17 @@ Victim_Candidate :: struct {
 
 // Solver holds the state of one CDCL search over a Formula.
 //
-// Settings (set after solver_init, before solve): phase_saving,
+// Settings (set after solver_make, before solve): phase_saving,
 // restart_schedule, restart_unit, reduce_first, reduce_inc, and minimize.
 // Statistics (read after solve): conflicts, decisions, restarts, clauses_deleted,
-// reductions, max_literals, and tot_literals.
+// reductions, max_literals, tot_literals, and infos (per clause: learned, deleted, LBD).
 // prop_time, pick_time and analyze_time are filled in only in LOKI_PROFILE builds.
 // On .Sat, values hold the assignment.
 // All other fields are internal.
 Solver :: struct {
 	// Internal
 	formula:          ^Formula,
+	allocator:        runtime.Allocator, // for the solver's own state
 	values:           []LBool,
 	analyze_stack:    [dynamic]Literal,
 	seen_to_clear:    [dynamic]Literal,
@@ -113,11 +115,14 @@ Solver :: struct {
 	minimize:         Minimize_Mode,
 }
 
-// solver_init creates a solver for f. The solver keeps a pointer to f, so f
-// must outlive it; release the solver with solver_destroy.
-solver_init :: proc(f: ^Formula) -> Solver {
+// solver_make creates a solver for f. The solver keeps a pointer to f, so f
+// must outlive it; release the solver with solver_destroy. The solver's own
+// state is allocated with allocator. Learned clauses are added to f and use
+// f's clause allocator, so formula_destroy frees them.
+solver_make :: proc(f: ^Formula, allocator := context.allocator) -> Solver {
 	s := Solver {
 		formula          = f,
+		allocator        = allocator,
 		var_inc          = 1.0,
 		reduce_first     = 2000,
 		reduce_inc       = 300,
@@ -125,14 +130,22 @@ solver_init :: proc(f: ^Formula) -> Solver {
 		minimize         = .Recursive,
 		restart_unit     = 100,
 		phase_saving     = true,
-		watches          = make([][dynamic]Watch, 2 * f.num_vars),
-		values           = make([]LBool, f.num_vars),
-		seen             = make([]bool, f.num_vars),
-		lbd_levels       = make([]bool, f.num_vars + 1),
-		levels           = make([]int, f.num_vars),
-		reasons          = make([]int, f.num_vars),
-		activity         = make([]f64, f.num_vars),
-		polarity         = make([]bool, f.num_vars),
+		watches          = make([][dynamic]Watch, 2 * f.num_vars, allocator),
+		values           = make([]LBool, f.num_vars, allocator),
+		seen             = make([]bool, f.num_vars, allocator),
+		lbd_levels       = make([]bool, f.num_vars + 1, allocator),
+		levels           = make([]int, f.num_vars, allocator),
+		reasons          = make([]int, f.num_vars, allocator),
+		activity         = make([]f64, f.num_vars, allocator),
+		polarity         = make([]bool, f.num_vars, allocator),
+		analyze_stack    = make([dynamic]Literal, allocator),
+		seen_to_clear    = make([dynamic]Literal, allocator),
+		trail            = make([dynamic]Literal, allocator),
+		level_starts     = make([dynamic]int, allocator),
+		infos            = make([dynamic]Clause_Info, allocator),
+	}
+	for &w in s.watches {
+		w = make([dynamic]Watch, allocator)
 	}
 	for c, i in f.clauses {
 		append(&s.infos, Clause_Info{})
@@ -145,7 +158,7 @@ solver_init :: proc(f: ^Formula) -> Solver {
 		v = true
 	}
 	// Every variable starts unassigned, so every variable starts in the heap.
-	heap_init(&s.order, f.num_vars)
+	heap_init(&s.order, f.num_vars, allocator)
 	for v in 0 ..< f.num_vars {
 		heap_insert(&s.order, s.activity, Var(v))
 	}
@@ -154,21 +167,23 @@ solver_init :: proc(f: ^Formula) -> Solver {
 
 // solver_destroy frees the solver's internal state. It does not free the formula.
 solver_destroy :: proc(s: ^Solver) {
-	delete(s.values)
+	// Slices don't remember their allocator, so they're freed with s.allocator.
+	// Dynamic arrays do, so a plain delete is enough.
+	delete(s.values, s.allocator)
 	delete(s.trail)
 	delete(s.level_starts)
 	// delete the inner before the outer
 	for v in s.watches {
 		delete(v)
 	}
-	delete(s.watches)
-	delete(s.reasons)
-	delete(s.levels)
-	delete(s.lbd_levels)
-	delete(s.seen)
-	delete(s.activity)
+	delete(s.watches, s.allocator)
+	delete(s.reasons, s.allocator)
+	delete(s.levels, s.allocator)
+	delete(s.lbd_levels, s.allocator)
+	delete(s.seen, s.allocator)
+	delete(s.activity, s.allocator)
 	delete(s.infos)
-	delete(s.polarity)
+	delete(s.polarity, s.allocator)
 	delete(s.seen_to_clear)
 	delete(s.analyze_stack)
 	heap_destroy(&s.order)
@@ -195,9 +210,9 @@ assign :: proc(s: ^Solver, l: Literal, reason: int) {
 	s.reasons[v] = reason
 	s.levels[v] = decision_level(s)
 	if lit_is_neg(l) {
-		s.values[v] = LBool.False
+		s.values[v] = .False
 	} else {
-		s.values[v] = LBool.True
+		s.values[v] = .True
 	}
 	append(&s.trail, l)
 }
@@ -425,7 +440,6 @@ solve :: proc(s: ^Solver) -> Result {
 			}
 		}
 	}
-	return .Unsat
 }
 
 // analyze performs conflict analysis on the conflict clause `confl` using the
@@ -441,13 +455,21 @@ solve :: proc(s: ^Solver) -> Result {
 //              and the latest-level one.
 //   backjump_level - highest decision level among learnt[1:], or 0 for a unit clause.
 //
-// As a side effect, bump (VSIDS) is applied to every newly seen literal above
-// decision level 0, so variables involved in recent conflicts are preferred by
+// The clause is then minimized according to s.minimize (see Minimize_Mode), and
+// its length before and after minimizing is added to s.max_literals and
+// s.tot_literals.
+//
+// As a side effect, every newly seen variable above decision level 0 is bumped
+// (VSIDS), so variables involved in recent conflicts are preferred by
 // pick_unassigned.
 //
 // The caller owns the returned dynamic array.
 @(private)
 analyze :: proc(s: ^Solver, confl: int) -> (learnt: [dynamic]Literal, backjump_level: int) {
+	// The formula will own the clause, so it uses the formula's allocator.
+	// Setting the field is cheaper than make() here: analyze runs once per
+	// conflict, and make cost about 6% of total solve time on uuf250.
+	learnt.allocator = clause_allocator(s.formula)
 	append(&learnt, Literal(0)) // reserves slot 0 for the negated UIP
 
 	counter := 0 // seen literals at the current level still to resolve
@@ -529,7 +551,7 @@ analyze :: proc(s: ^Solver, confl: int) -> (learnt: [dynamic]Literal, backjump_l
 		}
 		resize(&learnt, j)
 	case .Recursive:
-		levels: u32 = 0
+		levels: u32
 		for i in 1 ..< len(learnt) {
 			levels |= abstract_level(s, lit_var(learnt[i]))
 		}
@@ -549,7 +571,6 @@ analyze :: proc(s: ^Solver, confl: int) -> (learnt: [dynamic]Literal, backjump_l
 	s.tot_literals += len(learnt)
 
 	// backjump level = highest level among learnt[1:], move that literal into slot 1
-	backjump_level = 0
 	max_i := 1
 	for i in 1 ..< len(learnt) {
 		lvl := s.levels[lit_var(learnt[i])]
@@ -585,7 +606,7 @@ bump :: proc(s: ^Solver, v: Var) {
 	}
 }
 
-// compute_lbd returns the number or distinct decision levels among lits.
+// compute_lbd returns the number of distinct decision levels among lits.
 @(private)
 compute_lbd :: proc(s: ^Solver, lits: []Literal) -> int {
 	lbd := 0
@@ -608,6 +629,10 @@ compute_lbd :: proc(s: ^Solver, lits: []Literal) -> int {
 	return lbd
 }
 
+// locked reports whether clause ci is the reason for a literal that is assigned
+// now. Deleting a locked clause would leave analyze following reasons[v] to a
+// clause that no longer exists. A clause only ever implies its c[0], and
+// backtrack leaves stale reasons behind, so both halves of the test are needed.
 @(private)
 locked :: proc(s: ^Solver, ci: int) -> bool {
 	c := s.formula.clauses[ci]
@@ -615,15 +640,9 @@ locked :: proc(s: ^Solver, ci: int) -> bool {
 	return lit_value(s, c[0]) == .True && s.reasons[lit_var(c[0])] == ci
 }
 
-// Victim rules: a clause can be deleted only if it's learned, has LBD > 2 (glue clauses are kept),
-// and is not locked.
-// Among those, sort by LBD, highest first, and pick the first half.
-//  - Locked clauses: a clause is locked while it's the reason for a literal that's currently assigned.
-//    Deleting it would leave analyze following reasons[v] to a clause that no longer exists.
-//  - Fast locked test: in your code, a clause only ever assigns its slot-0 literal, so the test is "c[0] is
-//    true now and reasons[var] == ci". You need both halves because backtrack leaves old reasons entries
-//    behind, the same way it leaves levels behind, which ties back to the decision_level() vs s.levels[v]
-//    mix-up from earlier.
+// collect_victims returns the indices of the learned clauses to delete: of those
+// with LBD > 2 (glue clauses are kept) that are not deleted or locked, the worse
+// half by LBD. The caller owns the returned array and frees it with delete.
 @(private)
 collect_victims :: proc(s: ^Solver) -> [dynamic]int {
 	candidates: [dynamic]Victim_Candidate
@@ -650,8 +669,6 @@ collect_victims :: proc(s: ^Solver) -> [dynamic]int {
 		append(&result, candidates[k].ci)
 	}
 
-
-	// return the clause indices of the first half. The caller owns the returned array, and the temporary list is freed inside the proc.
 	return result
 }
 
@@ -675,7 +692,7 @@ reduce_db :: proc(s: ^Solver) {
 	}
 
 	for ci in victims {
-		delete(s.formula.clauses[ci])
+		delete(s.formula.clauses[ci], clause_allocator(s.formula))
 		s.formula.clauses[ci] = nil
 	}
 	s.clauses_deleted += len(victims)

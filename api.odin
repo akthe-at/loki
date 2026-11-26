@@ -14,7 +14,7 @@ solve_file :: proc(
 	f := parse_dimacs(path) or_return
 	defer formula_destroy(&f)
 
-	s := solver_init(&f)
+	s := solver_make(&f)
 	defer solver_destroy(&s)
 
 	result = solve(&s)
@@ -22,11 +22,7 @@ solve_file :: proc(
 	if result == .Sat {
 		solution = make([]bool, f.num_vars, allocator)
 		for v, i in s.values {
-			if v == .True {
-				solution[i] = true
-			} else {
-				solution[i] = false
-			}
+			solution[i] = v == .True
 		}
 	}
 

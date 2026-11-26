@@ -12,18 +12,15 @@ Model :: struct {
 
 // new_bool_var creates a Boolean variable and returns its positive literal.
 new_bool_var :: proc(m: ^Model) -> Literal {
-	counter := m.formula.num_vars
-	l := lit_pos(Var(counter))
-
+	l := lit_pos(Var(m.formula.num_vars))
 	m.formula.num_vars += 1
-
 	return l
 }
 
 // add_clause adds a clause that requires at least one of lits to be true.
 // The model copies the literals. An empty clause makes the model unsatisfiable.
 add_clause :: proc(m: ^Model, lits: ..Literal) {
-	c := make([]Literal, len(lits))
+	c := make([]Literal, len(lits), clause_allocator(&m.formula))
 	copy(c, lits)
 	append(&m.formula.clauses, c)
 }
@@ -45,7 +42,8 @@ add_at_most_one :: proc(m: ^Model, lits: []Literal) {
 }
 
 // add_at_most adds "at most k of lits are true", using Sinz's sequential counter.
-// It creates (n-1)*k auxiliary variables when 1 <= k < n.
+// It creates (n-1)*k auxiliary variables when 1 <= k < n. A negative k makes
+// the model unsatisfiable.
 add_at_most :: proc(m: ^Model, lits: []Literal, k: int) {
 	n := len(lits)
 	switch {
@@ -107,7 +105,8 @@ add_at_most :: proc(m: ^Model, lits: []Literal, k: int) {
 
 }
 
-// add_at_least adds "at least k of lits are true".
+// add_at_least adds "at least k of lits are true". k <= 0 adds nothing, and
+// k > len(lits) makes the model unsatisfiable.
 add_at_least :: proc(m: ^Model, lits: []Literal, k: int) {
 	if k <= 0 {
 		return
@@ -125,7 +124,8 @@ add_at_least :: proc(m: ^Model, lits: []Literal, k: int) {
 	add_at_most(m, neg, len(lits) - k)
 }
 
-// add_exactly adds "exactly k of lits are true".
+// add_exactly adds "exactly k of lits are true". A k below 0 or above len(lits)
+// makes the model unsatisfiable.
 add_exactly :: proc(m: ^Model, lits: []Literal, k: int) {
 	add_at_most(m, lits, k)
 	add_at_least(m, lits, k)
@@ -154,7 +154,7 @@ model_solve :: proc(
 	solution: []bool,
 ) {
 
-	s := solver_init(&m.formula)
+	s := solver_make(&m.formula)
 	defer solver_destroy(&s)
 
 	result = solve(&s)
@@ -162,11 +162,7 @@ model_solve :: proc(
 	if result == .Sat {
 		solution = make([]bool, m.formula.num_vars, allocator)
 		for v, i in s.values {
-			if v == .True {
-				solution[i] = true
-			} else {
-				solution[i] = false
-			}
+			solution[i] = v == .True
 		}
 	}
 	return result, solution

@@ -23,7 +23,7 @@ fixture :: proc(t: ^testing.T, text: string, loc := #caller_location) -> (f: ^Fo
 	err: Parse_Error
 	f^, err = parse_dimacs_string(text)
 	testing.expect_value(t, err, Parse_Error.None, loc = loc)
-	s = solver_init(f)
+	s = solver_make(f)
 	return
 }
 
@@ -41,7 +41,7 @@ decide :: proc(s: ^Solver, l: Literal) {
 	assign(s, l, NO_REASON)
 }
 
-// backtrack had a a bug earlier..it saved polarity[level] instead of
+// backtrack once had a bug: it saved polarity[level] instead of
 // polarity[lit_var(l)]. This test catches that, and checks everything else
 // backtrack is responsible for.
 @(test)
@@ -99,7 +99,7 @@ backtrack_without_phase_saving :: proc(t: ^testing.T) {
 	decide(&s, L(-2))
 	backtrack(&s, 0)
 
-	// solver_init starts every phase as true, and nothing may change it
+	// solver_make starts every phase as true, and nothing may change it
 	testing.expect_value(t, s.polarity[0], true)
 	testing.expect_value(t, s.polarity[1], true)
 }
@@ -234,7 +234,7 @@ pick_matches_linear_scan :: proc(t: ^testing.T) {
 	testing.expect(t, !ok) // everything assigned
 }
 
-// scan_unassigned is the earlier pick_unassigned, kept as a reference for now.
+// scan_unassigned is the earlier pick_unassigned, kept as a reference.
 @(private = "file")
 scan_unassigned :: proc(s: ^Solver) -> (Var, bool) {
 	best := -1
@@ -300,9 +300,9 @@ collect_victims_rules :: proc(t: ^testing.T) {
 	}
 }
 
-// asserts removed previously removed, as one test. A pigeonhole formula with a
-// tiny reduction schedule forces many learned clauses and several reduce_db
-// calls, then every invariant is checked.
+// The invariant checks that used to be asserts inside the solver, as one test.
+// A pigeonhole formula with a tiny reduction schedule forces many learned
+// clauses and several reduce_db calls, then every invariant is checked.
 @(test)
 invariants_after_solve_with_reductions :: proc(t: ^testing.T) {
 	text := pigeonhole(7, 6)

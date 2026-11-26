@@ -2,7 +2,7 @@ package main
 
 import loki "../.."
 import "core:fmt"
-import "core:mem"
+@(require) import "core:mem"
 import "core:os"
 import "core:time"
 
@@ -39,7 +39,7 @@ main :: proc() {
 	// clauses came from the file; the self-check only uses those.
 	n_original := len(f.clauses)
 
-	s := loki.solver_init(&f)
+	s := loki.solver_make(&f)
 	defer loki.solver_destroy(&s)
 
 	// Settings from the environment (CLI only; the library takes struct fields).
@@ -50,29 +50,27 @@ main :: proc() {
 	}
 	fmt.println("phase saving:", "on" if s.phase_saving else "off")
 
-	// LOKI_MINIMIZE
-	if value, found := os.lookup_env("LOKI_MINIMIZE", context.temp_allocator);
-	   found && value == "local" {
-		s.minimize = .Local
-	}
-	if value, found := os.lookup_env("LOKI_MINIMIZE", context.temp_allocator);
-	   found && value == "none" {
-		s.minimize = .None
-	}
-	if value, found := os.lookup_env("LOKI_MINIMIZE", context.temp_allocator);
-	   found && value == "recursive" {
-		s.minimize = .Recursive
+	// LOKI_MINIMIZE=none|local|recursive
+	if value, found := os.lookup_env("LOKI_MINIMIZE", context.temp_allocator); found {
+		switch value {
+		case "none":
+			s.minimize = .None
+		case "local":
+			s.minimize = .Local
+		case "recursive":
+			s.minimize = .Recursive
+		}
 	}
 	fmt.println("minimize:", s.minimize)
 
-	// LOKI_RESTARTS
-	if value, found := os.lookup_env("LOKI_RESTARTS", context.temp_allocator);
-	   found && value == "luby" {
-		s.restart_schedule = .Luby
-	}
-	if value, found := os.lookup_env("LOKI_RESTARTS", context.temp_allocator);
-	   found && value == "geometric" {
-		s.restart_schedule = .Geometric
+	// LOKI_RESTARTS=luby|geometric
+	if value, found := os.lookup_env("LOKI_RESTARTS", context.temp_allocator); found {
+		switch value {
+		case "luby":
+			s.restart_schedule = .Luby
+		case "geometric":
+			s.restart_schedule = .Geometric
+		}
 	}
 	fmt.println("restart schedule:", s.restart_schedule)
 

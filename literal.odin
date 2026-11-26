@@ -41,9 +41,7 @@ lit_not :: proc(l: Literal) -> Literal {
 
 // lit_is_true reports whether l is true under assignment, which is indexed by variable.
 lit_is_true :: proc(l: Literal, assignment: []bool) -> bool {
-	value := assignment[lit_var(l)]
-	negated := l % 2 == 1
-	return value != negated
+	return assignment[lit_var(l)] != lit_is_neg(l)
 }
 
 // lit_value returns the value of l under s's current assignment, or .Undef.
