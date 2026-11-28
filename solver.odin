@@ -10,7 +10,34 @@ LOKI_PROFILE :: #config(LOKI_PROFILE, false)
 
 // NO_REASON is the sentinel for "no clause": no implying reason or no conflict.
 @(private)
-NO_REASON :: -1
+NO_REASON :: Cref(max(u32))
+
+// Cref names a clause by its offset into Solver.arena.
+@(private)
+Cref :: distinct u32
+
+// Every clause in the arena is a 2-word header followed by its literals.
+// Word 0 holds the size and three flags.
+// Word 1 holds the LBD, or while `arena_compact` runs, the clause's new Cref.
+@(private)
+HEADER_WORDS :: 2
+
+@(private)
+SIZE_MASK :: u32(1 << 29) - 1
+
+@(private)
+LEARNED_BIT :: u32(1) << 29
+
+@(private)
+DELETED_BIT :: u32(1) << 30
+
+@(private)
+RELOCATED_BIT :: u32(1) << 31
+
+// COMPACT_FRAC is the share of wasted arena words that triggers arena_compact
+// (MiniSat's garbage_frac).
+@(private)
+COMPACT_FRAC :: 0.20
 
 // LBool is a lifted Boolean: True, False, or Undef (the zero value, unassigned).
 LBool :: enum u8 {
@@ -45,23 +72,22 @@ Minimize_Mode :: enum {
 	Recursive,
 }
 
+// Watch is one entry in a literal's watch list: clause cref watches this literal,
+// and propagate visits it when the literal becomes false. blocker is another
+// literal of the clause; if it is true, the clause is satisfied and propagate
+// skips it without reading the arena. binary marks a 2-literal clause, whose
+// blocker is its only other literal. Packed into 8 bytes, so cref has 31 bits.
 @(private)
-Watch :: struct {
-	ci:      int,
-	blocker: Literal,
-	binary:  bool,
+Watch :: bit_field u64 {
+	cref:    Cref    | 31,
+	binary:  bool    | 1,
+	blocker: Literal | 32,
 }
-
-@(private)
-Clause_Info :: struct {
-	lbd:     int,
-	learned: bool,
-	deleted: bool,
-}
+#assert(size_of(Watch) == 8)
 
 @(private)
 Victim_Candidate :: struct {
-	ci:  int,
+	cr:  Cref,
 	lbd: int,
 }
 
@@ -71,7 +97,8 @@ Victim_Candidate :: struct {
 // Settings (set after solver_make, before solve): phase_saving,
 // restart_schedule, restart_unit, reduce_first, reduce_inc, and minimize.
 // Statistics (read after solve): conflicts, decisions, restarts, clauses_deleted,
-// reductions, max_literals, tot_literals, and infos (per clause: learned, deleted, LBD).
+// reductions, max_literals, and tot_literals; len(learnts) is the number of
+// live learned clauses, and learned_lbd_stats summarizes them.
 // prop_time, pick_time and analyze_time are filled in only in LOKI_PROFILE builds.
 // On .Sat, values hold the assignment.
 // All other fields are internal.
@@ -81,14 +108,17 @@ Solver :: struct {
 	allocator:        runtime.Allocator, // for the solver's own state
 	values:           []LBool,
 	analyze_stack:    [dynamic]Literal,
+	arena:            [dynamic]u32,
 	seen_to_clear:    [dynamic]Literal,
 	trail:            [dynamic]Literal,
 	level_starts:     [dynamic]int,
-	infos:            [dynamic]Clause_Info,
 	watches:          [][dynamic]Watch,
+	learnts:          [dynamic]Cref,
+	learnt_buffer:    [dynamic]Literal,
+	wasted:           int,
 	qhead:            int,
 	levels:           []int,
-	reasons:          []int,
+	reasons:          []Cref,
 	seen:             []bool,
 	lbd_levels:       []bool,
 	polarity:         []bool,
@@ -116,9 +146,9 @@ Solver :: struct {
 }
 
 // solver_make creates a solver for f. The solver keeps a pointer to f, so f
-// must outlive it; release the solver with solver_destroy. The solver's own
-// state is allocated with allocator. Learned clauses are added to f and use
-// f's clause allocator, so formula_destroy frees them.
+// must outlive it; release the solver with solver_destroy. Everything the
+// solver allocates, including the clause arena that holds a copy of f's clauses
+// and every learned clause, uses allocator. solve never changes f.
 solver_make :: proc(f: ^Formula, allocator := context.allocator) -> Solver {
 	s := Solver {
 		formula          = f,
@@ -135,28 +165,31 @@ solver_make :: proc(f: ^Formula, allocator := context.allocator) -> Solver {
 		seen             = make([]bool, f.num_vars, allocator),
 		lbd_levels       = make([]bool, f.num_vars + 1, allocator),
 		levels           = make([]int, f.num_vars, allocator),
-		reasons          = make([]int, f.num_vars, allocator),
+		reasons          = make([]Cref, f.num_vars, allocator),
 		activity         = make([]f64, f.num_vars, allocator),
 		polarity         = make([]bool, f.num_vars, allocator),
+		arena            = make([dynamic]u32, allocator),
 		analyze_stack    = make([dynamic]Literal, allocator),
 		seen_to_clear    = make([dynamic]Literal, allocator),
 		trail            = make([dynamic]Literal, allocator),
 		level_starts     = make([dynamic]int, allocator),
-		infos            = make([dynamic]Clause_Info, allocator),
+		learnts          = make([dynamic]Cref, allocator),
+		learnt_buffer    = make([dynamic]Literal, allocator),
 	}
 	for &w in s.watches {
 		w = make([dynamic]Watch, allocator)
 	}
-	for c, i in f.clauses {
-		append(&s.infos, Clause_Info{})
+
+	for c in f.clauses {
 		if len(c) >= 2 {
-			append(&s.watches[c[0]], Watch{ci = i, blocker = c[1], binary = len(c) == 2})
-			append(&s.watches[c[1]], Watch{ci = i, blocker = c[0], binary = len(c) == 2})
+			attach(&s, clause_alloc(&s, c, learned = false, lbd = 0))
 		}
 	}
+
 	for &v in s.polarity {
 		v = true
 	}
+
 	// Every variable starts unassigned, so every variable starts in the heap.
 	heap_init(&s.order, f.num_vars, allocator)
 	for v in 0 ..< f.num_vars {
@@ -182,11 +215,75 @@ solver_destroy :: proc(s: ^Solver) {
 	delete(s.lbd_levels, s.allocator)
 	delete(s.seen, s.allocator)
 	delete(s.activity, s.allocator)
-	delete(s.infos)
 	delete(s.polarity, s.allocator)
+	delete(s.learnts)
+	delete(s.learnt_buffer)
 	delete(s.seen_to_clear)
 	delete(s.analyze_stack)
+	delete(s.arena)
 	heap_destroy(&s.order)
+}
+
+// clause_alloc copies lits into the arena behind a two-word header (size and
+// flags, then the LBD) and returns the new clause's
+// Cref. Appending can move the arena, so any slice from clause_lits is
+// invalid afterwards.
+@(private)
+clause_alloc :: proc(s: ^Solver, lits: []Literal, learned: bool, lbd: int) -> Cref {
+	assert(len(s.arena) < 1 << 31, "arena too big for a Watch's 31-bit cref")
+
+	cr := Cref(len(s.arena))
+	word0 := u32(len(lits))
+	if learned {
+		word0 |= LEARNED_BIT
+	}
+	append(&s.arena, word0)
+	append(&s.arena, u32(lbd))
+	for l in lits {
+		append(&s.arena, u32(l))
+	}
+	return cr
+}
+
+// attach watches cr's first two literals, so propagate visits cr when either becomes false.
+// A binary clause's watches are marked binary, so propagate can use
+// the blocker alone and skip reading the arena.
+@(private)
+attach :: proc(s: ^Solver, cr: Cref) {
+	lits := clause_lits(s, cr)
+	binary := len(lits) == 2
+	append(&s.watches[lits[0]], Watch{cref = cr, blocker = lits[1], binary = binary})
+	append(&s.watches[lits[1]], Watch{cref = cr, blocker = lits[0], binary = binary})
+
+}
+
+// clause_lits returns cr's literals as a view into the arena, not a copy.
+// The slice is invalid after the next clause_alloc or arena_compact, which
+// can move the arena.
+@(private)
+clause_lits :: proc(s: ^Solver, cr: Cref) -> []Literal {
+	size := int(s.arena[cr] & SIZE_MASK)
+	start := int(cr) + HEADER_WORDS
+	return transmute([]Literal)s.arena[start:start + size]
+}
+
+// clause_learned reports whether cr was learned during the search vs copied from the formula.
+@(private)
+clause_learned :: proc(s: ^Solver, cr: Cref) -> bool {
+	return s.arena[cr] & LEARNED_BIT != 0
+}
+
+// clause_deleted reports whether reduce_db has deleted cr. Its words stay in
+// the arena, marked, until arena_compact squeezes them out.
+@(private)
+clause_deleted :: proc(s: ^Solver, cr: Cref) -> bool {
+	return s.arena[cr] & DELETED_BIT != 0
+}
+
+// clause_lbd returns the LBD stored in cr's header: 0 for original clauses.
+@(private)
+clause_lbd :: proc(s: ^Solver, cr: Cref) -> int {
+	return int(s.arena[cr + 1])
 }
 
 
@@ -202,10 +299,11 @@ clause_satisfied :: proc(c: Clause, assignment: []bool) -> bool {
 }
 
 
-// assign makes l true at the current decision level and records why: a clause
-// index in reason, or NO_REASON for decisions and root units.
+// assign makes l true at the current decision level and records why: the
+// Cref of the implying clause in reason, or NO_REASON for decisions and root
+// units.
 @(private)
-assign :: proc(s: ^Solver, l: Literal, reason: int) {
+assign :: proc(s: ^Solver, l: Literal, reason: Cref) {
 	v := lit_var(l)
 	s.reasons[v] = reason
 	s.levels[v] = decision_level(s)
@@ -217,10 +315,10 @@ assign :: proc(s: ^Solver, l: Literal, reason: int) {
 	append(&s.trail, l)
 }
 
-// propagate performs unit propagation on the trail. It returns the index of a
+// propagate performs unit propagation on the trail. It returns the Cref of a
 // conflicting clause, or NO_REASON if none was found.
 @(private)
-propagate :: proc(s: ^Solver) -> int {
+propagate :: proc(s: ^Solver) -> Cref {
 	for s.qhead < len(s.trail) {
 		p := s.trail[s.qhead]
 		s.qhead += 1
@@ -239,21 +337,21 @@ propagate :: proc(s: ^Solver) -> int {
 
 			if w.binary {
 
-				c := s.formula.clauses[w.ci]
+				c := clause_lits(s, w.cref)
 				if c[0] == false_lit {
 					c[0], c[1] = c[1], c[0]
 				}
 
 				if bv == .False {
-					return w.ci
+					return w.cref
 				}
 
-				assign(s, w.blocker, w.ci)
+				assign(s, w.blocker, w.cref)
 				i += 1
 				continue
 			}
-			ci := ws[i].ci
-			c := s.formula.clauses[ci]
+			cr := w.cref
+			c := clause_lits(s, cr)
 
 			// Normalise: Make sure false_lit is in c[1]
 			if c[0] == false_lit {
@@ -270,7 +368,7 @@ propagate :: proc(s: ^Solver) -> int {
 			for k in 2 ..< len(c) {
 				if lit_value(s, c[k]) != .False {
 					c[1], c[k] = c[k], c[1] // literal goes to watch pos 1
-					append(&s.watches[c[1]], Watch{ci = ci, blocker = c[0], binary = false}) // register clause under new watch
+					append(&s.watches[c[1]], Watch{cref = cr, blocker = c[0], binary = false}) // register clause under new watch
 					unordered_remove(ws, i) // remove it from old watch list
 					found = true
 					break
@@ -281,10 +379,10 @@ propagate :: proc(s: ^Solver) -> int {
 			}
 			// Case 3: No replacement, clause stays watching false_lit
 			if lit_value(s, c[0]) == .False {
-				return ci
+				return cr
 			} else {
 				ws[i].blocker = c[0]
-				assign(s, c[0], ci)
+				assign(s, c[0], cr)
 			}
 			i += 1
 		}
@@ -345,8 +443,8 @@ pick_unassigned :: proc(s: ^Solver) -> (Var, bool) {
 
 
 // solve runs conflict-driven clause learning. On .Sat, the satisfying
-// assignment is in s.values. Non-unit learned clauses are appended to
-// s.formula.clauses.
+// assignment is in s.values. Learned clauses go into the solver's arena; the
+// formula is left unchanged.
 solve :: proc(s: ^Solver) -> Result {
 	for c in s.formula.clauses {
 		switch len(c) {
@@ -423,20 +521,11 @@ solve :: proc(s: ^Solver) -> Result {
 			backtrack(s, backjump_level)
 			if len(learnt) == 1 {
 				assign(s, learnt[0], NO_REASON)
-				delete(learnt)
 			} else {
-				append(&s.formula.clauses, learnt[:])
-				ci := len(s.formula.clauses) - 1
-				append(&s.infos, Clause_Info{learned = true, lbd = lbd})
-				append(
-					&s.watches[learnt[0]],
-					Watch{ci = ci, blocker = learnt[1], binary = len(learnt) == 2},
-				)
-				append(
-					&s.watches[learnt[1]],
-					Watch{ci = ci, blocker = learnt[0], binary = len(learnt) == 2},
-				)
-				assign(s, learnt[0], ci)
+				cr := clause_alloc(s, learnt[:], learned = true, lbd = lbd)
+				append(&s.learnts, cr)
+				attach(s, cr)
+				assign(s, learnt[0], cr)
 			}
 		}
 	}
@@ -448,12 +537,12 @@ solve :: proc(s: ^Solver) -> Result {
 // until only one literal from the current decision level remains (the UIP).
 //
 // Returns the learnt clause and the level to backjump to:
-//   learnt   - slot 0 holds the negated UIP literal, which the clause asserts
+//   clause   - slot 0 holds the negated UIP literal, which the clause asserts
 //              after backjumping; slots 1.. hold falsified literals from
 //              earlier decision levels, with the highest-level one swapped
 //              into slot 1 so the two watched literals are the asserting one
 //              and the latest-level one.
-//   backjump_level - highest decision level among learnt[1:], or 0 for a unit clause.
+//   backjump_level - highest decision level among clause[1:], or 0 for a unit clause.
 //
 // The clause is then minimized according to s.minimize (see Minimize_Mode), and
 // its length before and after minimizing is added to s.max_literals and
@@ -463,14 +552,13 @@ solve :: proc(s: ^Solver) -> Result {
 // (VSIDS), so variables involved in recent conflicts are preferred by
 // pick_unassigned.
 //
-// The caller owns the returned dynamic array.
+// clause is a view of s.learnt_buffer: valid until the next analyze, and the
+// caller must not delete it.
 @(private)
-analyze :: proc(s: ^Solver, confl: int) -> (learnt: [dynamic]Literal, backjump_level: int) {
-	// The formula will own the clause, so it uses the formula's allocator.
-	// Setting the field is cheaper than make() here: analyze runs once per
-	// conflict, and make cost about 6% of total solve time on uuf250.
-	learnt.allocator = clause_allocator(s.formula)
-	append(&learnt, Literal(0)) // reserves slot 0 for the negated UIP
+analyze :: proc(s: ^Solver, confl: Cref) -> (clause: []Literal, backjump_level: int) {
+	learnt := &s.learnt_buffer
+	clear(learnt)
+	append(learnt, Literal(0)) // reserves slot 0 for the negated UIP
 
 	counter := 0 // seen literals at the current level still to resolve
 	p: Literal
@@ -482,7 +570,7 @@ analyze :: proc(s: ^Solver, confl: int) -> (learnt: [dynamic]Literal, backjump_l
 	// each time around the loop, look at one clause.
 	// first the conflict clause, then the reason clauses.
 	for {
-		c := s.formula.clauses[confl]
+		c := clause_lits(s, confl)
 		// skip c[0] once resolving reasons: it is p itself, the literal this
 		// clause propagated. the conflict clause asserts nothing, so the
 		// first pass scans every literal.
@@ -499,7 +587,7 @@ analyze :: proc(s: ^Solver, confl: int) -> (learnt: [dynamic]Literal, backjump_l
 				if s.levels[v] == current {
 					counter += 1
 				} else {
-					append(&learnt, q)
+					append(learnt, q)
 				}
 			}
 		}
@@ -535,7 +623,7 @@ analyze :: proc(s: ^Solver, confl: int) -> (learnt: [dynamic]Literal, backjump_l
 			v := lit_var(learnt[i])
 			keep := s.reasons[v] == NO_REASON
 			if !keep {
-				c := s.formula.clauses[s.reasons[v]]
+				c := clause_lits(s, s.reasons[v])
 				for k in 1 ..< len(c) {
 					u := lit_var(c[k])
 					if !s.seen[u] && s.levels[u] > 0 {
@@ -549,7 +637,7 @@ analyze :: proc(s: ^Solver, confl: int) -> (learnt: [dynamic]Literal, backjump_l
 				j += 1
 			}
 		}
-		resize(&learnt, j)
+		resize(learnt, j)
 	case .Recursive:
 		levels: u32
 		for i in 1 ..< len(learnt) {
@@ -564,7 +652,7 @@ analyze :: proc(s: ^Solver, confl: int) -> (learnt: [dynamic]Literal, backjump_l
 				j += 1
 			}
 		}
-		resize(&learnt, j)
+		resize(learnt, j)
 	}
 
 
@@ -588,7 +676,7 @@ analyze :: proc(s: ^Solver, confl: int) -> (learnt: [dynamic]Literal, backjump_l
 		s.seen[lit_var(l)] = false
 	}
 
-	return learnt, backjump_level
+	return learnt[:], backjump_level
 }
 
 // bump adds var_inc to activity[v]; if the result exceeds 1e100, it rescales
@@ -629,32 +717,32 @@ compute_lbd :: proc(s: ^Solver, lits: []Literal) -> int {
 	return lbd
 }
 
-// locked reports whether clause ci is the reason for a literal that is assigned
+// locked reports whether clause cr is the reason for a literal that is assigned
 // now. Deleting a locked clause would leave analyze following reasons[v] to a
 // clause that no longer exists. A clause only ever implies its c[0], and
 // backtrack leaves stale reasons behind, so both halves of the test are needed.
 @(private)
-locked :: proc(s: ^Solver, ci: int) -> bool {
-	c := s.formula.clauses[ci]
+locked :: proc(s: ^Solver, cr: Cref) -> bool {
+	c := clause_lits(s, cr)
 
-	return lit_value(s, c[0]) == .True && s.reasons[lit_var(c[0])] == ci
+	return lit_value(s, c[0]) == .True && s.reasons[lit_var(c[0])] == cr
 }
 
-// collect_victims returns the indices of the learned clauses to delete: of those
-// with LBD > 2 (glue clauses are kept) that are not deleted or locked, the worse
-// half by LBD. The caller owns the returned array and frees it with delete.
+// collect_victims returns the Crefs of the learned clauses to delete: of those
+// in s.learnts with LBD > 2 (glue clauses are kept) that are not locked, the
+// worse half by LBD. The caller owns the returned array and frees it with delete.
 @(private)
-collect_victims :: proc(s: ^Solver) -> [dynamic]int {
+collect_victims :: proc(s: ^Solver) -> [dynamic]Cref {
 	candidates: [dynamic]Victim_Candidate
 	defer delete(candidates)
 
-	result: [dynamic]int
+	result: [dynamic]Cref
 
-	for info, ci in s.infos {
-		// every clause index that is learned, has LBD > 2, and is not locked, each paired with its LBD
-		// if it passes all 3 tests, append a pair.
-		if info.learned && info.lbd > 2 && !info.deleted && !locked(s, ci) {
-			append(&candidates, Victim_Candidate{ci = ci, lbd = info.lbd})
+	for cr in s.learnts {
+		lbd := clause_lbd(s, cr)
+		// learned clauses with LBD > 2 that aren't locked, each paired with its LBD
+		if lbd > 2 && !locked(s, cr) {
+			append(&candidates, Victim_Candidate{cr = cr, lbd = lbd})
 		}
 	}
 
@@ -664,9 +752,9 @@ collect_victims :: proc(s: ^Solver) -> [dynamic]int {
 	})
 
 	// declare victims
-	// loop over first half of candidates: append each one's ci to victims
+	// loop over first half of candidates: append each one's cr to victims
 	for k in 0 ..< len(candidates) / 2 {
-		append(&result, candidates[k].ci)
+		append(&result, candidates[k].cr)
 	}
 
 	return result
@@ -676,14 +764,16 @@ collect_victims :: proc(s: ^Solver) -> [dynamic]int {
 reduce_db :: proc(s: ^Solver) {
 	victims := collect_victims(s)
 	defer delete(victims)
-	for ci in victims {
-		s.infos[ci].deleted = true
+	for cr in victims {
+		s.arena[cr] |= DELETED_BIT
+		s.wasted += HEADER_WORDS + len(clause_lits(s, cr))
 	}
 
+	// Drop watches of deleted clauses.
 	for &ws in s.watches {
 		j := 0
 		for w in ws {
-			if !s.infos[w.ci].deleted {
+			if !clause_deleted(s, w.cref) {
 				ws[j] = w
 				j += 1
 			}
@@ -691,12 +781,72 @@ reduce_db :: proc(s: ^Solver) {
 		resize(&ws, j)
 	}
 
-	for ci in victims {
-		delete(s.formula.clauses[ci], clause_allocator(s.formula))
-		s.formula.clauses[ci] = nil
+	// Drop deleted clauses from learnts, so the next reduce_db never picks them again.
+	j := 0
+	for cr in s.learnts {
+		if !clause_deleted(s, cr) {
+			s.learnts[j] = cr
+			j += 1
+		}
 	}
+	resize(&s.learnts, j)
+
 	s.clauses_deleted += len(victims)
 	s.reductions += 1
+	if f64(s.wasted) > COMPACT_FRAC * f64(len(s.arena)) {
+		arena_compact(s)
+	}
+}
+
+// arena_compact copies the live clauses, in order, into a new arena, and
+// moves every Cref the solver holds (watches, reasons of assigned variables,
+// learnts) to its clause's new position. reduce_db calls it once wasted words
+// pass COMPACT_FRAC of the arena. Any slice from clause_lits is invalid
+// afterwards, so it must not run while propagate or analyze holds one.
+@(private)
+arena_compact :: proc(s: ^Solver) {
+	// Part 1 - copy
+	to := make([dynamic]u32, 0, len(s.arena) - s.wasted, s.allocator)
+	pos := 0
+	for pos < len(s.arena) {
+		header := s.arena[pos]
+		words := HEADER_WORDS + int(header & SIZE_MASK)
+
+		if header & DELETED_BIT == 0 {
+			new_cr := u32(len(to))
+			append(&to, ..s.arena[pos:pos + words])
+			s.arena[pos] = header | RELOCATED_BIT
+			s.arena[pos + 1] = new_cr
+		}
+
+		pos += words
+	}
+
+	// Part 2 - relocate
+	relocate :: proc(old: []u32, cr: Cref) -> Cref {
+		assert(old[cr] & RELOCATED_BIT != 0, "a Cref to a deleted clause")
+		return Cref(old[int(cr) + 1])
+	}
+	for &ws in s.watches {
+		for &w in ws {
+			w.cref = relocate(s.arena[:], w.cref)
+		}
+	}
+
+	for l in s.trail {
+		v := lit_var(l)
+		if s.reasons[v] != NO_REASON {
+			s.reasons[v] = relocate(s.arena[:], s.reasons[v])
+		}
+	}
+
+	for &cr in s.learnts {
+		cr = relocate(s.arena[:], cr)
+	}
+	// Part 3 - swap
+	delete(s.arena)
+	s.arena = to
+	s.wasted = 0
 }
 
 @(private)
@@ -728,7 +878,7 @@ lit_redundant :: proc(s: ^Solver, p: Literal, abstract_levels: u32) -> bool {
 	top := len(s.seen_to_clear)
 	for len(s.analyze_stack) > 0 {
 		q := pop(&s.analyze_stack)
-		c := s.formula.clauses[s.reasons[lit_var(q)]]
+		c := clause_lits(s, s.reasons[lit_var(q)])
 		for l in c[1:] {
 			v := lit_var(l)
 			if s.seen[v] || s.levels[v] == 0 {
@@ -749,4 +899,23 @@ lit_redundant :: proc(s: ^Solver, p: Literal, abstract_levels: u32) -> bool {
 	}
 
 	return true
+}
+
+// learned_lbd_stats returns the average LBD of the learned clauses the solver
+// still holds, and how many of them are glue clauses (LBD <= 2). With no
+// learned clauses, the average is 0.
+learned_lbd_stats :: proc(s: ^Solver) -> (avg_lbd: f64, glue: int) {
+	sum := 0
+	for cr in s.learnts {
+		lbd := clause_lbd(s, cr)
+		sum += lbd
+		if lbd <= 2 {
+			glue += 1
+		}
+	}
+
+	if len(s.learnts) > 0 {
+		avg_lbd = f64(sum) / f64(len(s.learnts))
+	}
+	return avg_lbd, glue
 }

@@ -7,8 +7,7 @@ import "core:strings"
 import "core:testing"
 
 // solve_text parses text, solves it with the given settings, and for a Sat
-// answer checks the solution against the ORIGINAL clauses (solve appends learned
-// clauses to the formula, so those are left out).
+// answer checks the solution against every clause of the formula.
 solve_text :: proc(
 	t: ^testing.T,
 	text: string,
@@ -21,8 +20,6 @@ solve_text :: proc(
 	if !testing.expect_value(t, err, loki.Parse_Error.None, loc = loc) {
 		return .Unknown
 	}
-	n_original := len(f.clauses)
-
 	s := loki.solver_make(&f)
 	defer loki.solver_destroy(&s)
 	s.phase_saving = phase_saving
@@ -35,7 +32,7 @@ solve_text :: proc(
 		for v, i in s.values {
 			solution[i] = v == .True
 		}
-		for c, ci in f.clauses[:n_original] {
+		for c, ci in f.clauses {
 			testing.expectf(t, loki.clause_satisfied(c, solution), "Sat solution breaks clause %d", ci, loc = loc)
 		}
 	}
