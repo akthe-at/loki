@@ -143,7 +143,7 @@ model_destroy :: proc(m: ^Model) {
 	formula_destroy(&m.formula)
 }
 
-// model_solve solves m and may add learned clauses to its formula.
+// model_solve solves m. The formula is left unchanged.
 // On .Sat, solution[v] gives the value of variable v (zero-based).
 // The caller owns the solution and frees it with delete.
 model_solve :: proc(

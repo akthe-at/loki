@@ -35,10 +35,6 @@ main :: proc() {
 	}
 	defer loki.formula_destroy(&f)
 
-	// solve() appends learned clauses to f.clauses, so remember how many
-	// clauses came from the file; the self-check only uses those.
-	n_original := len(f.clauses)
-
 	s := loki.solver_make(&f)
 	defer loki.solver_destroy(&s)
 
@@ -89,7 +85,7 @@ main :: proc() {
 		}
 
 		check_ok := true
-		for c in f.clauses[:n_original] {
+		for c in f.clauses {
 			if !loki.clause_satisfied(c, assignment) {
 				check_ok = false
 				break
@@ -98,7 +94,8 @@ main :: proc() {
 		fmt.println("check:    ", "ok" if check_ok else "FAILED")
 	}
 
-	learned := len(f.clauses) - n_original
+	// learnts holds the learned clauses still alive; reduce_db removed the rest.
+	learned := len(s.learnts) + s.clauses_deleted
 	fmt.printf("time:      %.2f ms\n", time.duration_milliseconds(elapsed))
 	// Profile builds only: where the solve time went.
 	when loki.LOKI_PROFILE {
@@ -130,19 +127,8 @@ main :: proc() {
 		100 * f64(s.max_literals - s.tot_literals) / f64(s.max_literals) if s.max_literals > 0 else 0
 	fmt.printf("conflict literals: %d (%.2f%% deleted)\n", s.tot_literals, pct_deleted)
 
-	// Clause quality: average LBD and glue count (LBD <= 2) over learned clauses.
-	n_learned, lbd_sum, glue := 0, 0, 0
-	for info in s.infos {
-		if !info.learned {
-			continue
-		}
-		n_learned += 1
-		lbd_sum += info.lbd
-		if info.lbd <= 2 {
-			glue += 1
-		}
-	}
-	avg_lbd := f64(lbd_sum) / f64(n_learned) if n_learned > 0 else 0
+	// Clause quality: average LBD and glue count (LBD <= 2) over live learned clauses.
+	avg_lbd, glue := loki.learned_lbd_stats(&s)
 	fmt.printf("avg lbd:   %.2f\n", avg_lbd)
 	fmt.println("glue:     ", glue)
 }

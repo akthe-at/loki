@@ -27,6 +27,29 @@ fixture :: proc(t: ^testing.T, text: string, loc := #caller_location) -> (f: ^Fo
 	return
 }
 
+// cref_of returns the Cref of the i-th clause in the arena (0-based, in the
+// order the clauses were added). In a fixture whose clauses all have 2+
+// literals, clause i of the text is cref_of(s, i).
+@(private = "file")
+cref_of :: proc(s: ^Solver, i: int) -> Cref {
+	cr := 0
+	for _ in 0 ..< i {
+		cr += HEADER_WORDS + int(s.arena[cr] & SIZE_MASK)
+	}
+	return Cref(cr)
+}
+
+// arena_clauses returns the Cref of every clause in the arena, deleted ones
+// included, in arena order. The caller deletes the result.
+@(private = "file")
+arena_clauses :: proc(s: ^Solver) -> [dynamic]Cref {
+	out: [dynamic]Cref
+	for cr := 0; cr < len(s.arena); cr += HEADER_WORDS + int(s.arena[cr] & SIZE_MASK) {
+		append(&out, Cref(cr))
+	}
+	return out
+}
+
 @(private = "file")
 teardown :: proc(f: ^Formula, s: ^Solver) {
 	solver_destroy(s)
@@ -117,8 +140,8 @@ propagate_unit_chain :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(s.trail), 3)
 	testing.expect_value(t, s.values[1], LBool.True)
 	testing.expect_value(t, s.values[2], LBool.True)
-	testing.expect_value(t, s.reasons[1], 0) // x2 because of clause 0
-	testing.expect_value(t, s.reasons[2], 1) // x3 because of clause 1
+	testing.expect_value(t, s.reasons[1], cref_of(&s, 0)) // x2 because of clause 0
+	testing.expect_value(t, s.reasons[2], cref_of(&s, 1)) // x3 because of clause 1
 	testing.expect_value(t, s.levels[1], 1)
 	testing.expect_value(t, s.levels[2], 1)
 }
@@ -136,7 +159,7 @@ propagate_reports_conflict :: proc(t: ^testing.T) {
 	if !testing.expect(t, confl != NO_REASON) {
 		return
 	}
-	for l in f.clauses[confl] {
+	for l in clause_lits(&s, confl) {
 		testing.expectf(
 			t,
 			lit_value(&s, l) == .False,
@@ -181,7 +204,6 @@ analyze_hand_example :: proc(t: ^testing.T) {
 	}
 
 	learnt, backjump_level := analyze(&s, confl)
-	defer delete(learnt)
 
 	testing.expect_value(t, backjump_level, 1)
 	if testing.expect_value(t, len(learnt), 2) {
@@ -257,46 +279,24 @@ collect_victims_rules :: proc(t: ^testing.T) {
 	)
 	defer teardown(f, &s)
 
-	s.infos[0] = {
-		learned = false,
-		lbd     = 10,
-	} // original clause: never deleted
-	s.infos[1] = {
-		learned = true,
-		lbd     = 2,
-	} // glue: kept
-	s.infos[2] = {
-		learned = true,
-		lbd     = 3,
+	// Clause 0 stays original (never deleted). Clauses 1-7 become learned with
+	// these LBDs: 1 is glue (kept), 6 is locked below (kept).
+	lbds := [8]int{0, 2, 3, 4, 5, 6, 9, 7}
+	for i in 1 ..< 8 {
+		cr := cref_of(&s, i)
+		s.arena[cr] |= LEARNED_BIT
+		s.arena[int(cr) + 1] = u32(lbds[i])
+		append(&s.learnts, cr)
 	}
-	s.infos[3] = {
-		learned = true,
-		lbd     = 4,
-	}
-	s.infos[4] = {
-		learned = true,
-		lbd     = 5,
-	}
-	s.infos[5] = {
-		learned = true,
-		lbd     = 6,
-	}
-	s.infos[6] = {
-		learned = true,
-		lbd     = 9,
-	} // locked below: kept
-	s.infos[7] = {
-		learned = true,
-		lbd     = 7,
-	}
-	assign(&s, f.clauses[6][0], 6) // clause 6 is now the reason for x13
+	c6 := cref_of(&s, 6)
+	assign(&s, clause_lits(&s, c6)[0], c6) // clause 6 is now the reason for x13
 
 	// deletable: clauses 2, 3, 4, 5, 7. Half of 5 is 2: the worst two by LBD.
 	victims := collect_victims(&s)
 	defer delete(victims)
 	if testing.expect_value(t, len(victims), 2) {
-		testing.expect_value(t, victims[0], 7) // lbd 7
-		testing.expect_value(t, victims[1], 5) // lbd 6
+		testing.expect_value(t, victims[0], cref_of(&s, 7)) // lbd 7
+		testing.expect_value(t, victims[1], cref_of(&s, 5)) // lbd 6
 	}
 }
 
@@ -311,13 +311,14 @@ invariants_after_solve_with_reductions :: proc(t: ^testing.T) {
 	defer teardown(f, &s)
 	s.reduce_first = 50
 	s.reduce_inc = 10
+	n_original := len(f.clauses)
 
 	testing.expect_value(t, solve(&s), Result.Unsat)
 	testing.expect(t, s.reductions > 0)
 	testing.expect(t, s.clauses_deleted > 0)
 
-	// infos and clauses stay the same length
-	testing.expect_value(t, len(s.infos), len(f.clauses))
+	// solving never changes the formula
+	testing.expect_value(t, len(f.clauses), n_original)
 
 	// every watch entry: live clause, filed under one of its two watched
 	// literals, blocker taken from the clause, binary flag matching its length
@@ -325,27 +326,27 @@ invariants_after_solve_with_reductions :: proc(t: ^testing.T) {
 		for w in ws {
 			if !testing.expectf(
 				t,
-				!s.infos[w.ci].deleted,
+				!clause_deleted(&s, w.cref),
 				"watches[%d] holds deleted clause %d",
 				lit,
-				w.ci,
+				w.cref,
 			) {
 				continue
 			}
-			c := f.clauses[w.ci]
+			c := clause_lits(&s, w.cref)
 			testing.expectf(
 				t,
 				c[0] == Literal(lit) || c[1] == Literal(lit),
 				"watches[%d] holds clause %d, which doesn't watch it",
 				lit,
-				w.ci,
+				w.cref,
 			)
 			testing.expectf(
 				t,
 				slice.contains(c, w.blocker),
 				"watches[%d]: clause %d's blocker %d is not in the clause",
 				lit,
-				w.ci,
+				w.cref,
 				w.blocker,
 			)
 			// an entry filed under x is visited only when x is false, so x
@@ -355,56 +356,114 @@ invariants_after_solve_with_reductions :: proc(t: ^testing.T) {
 				w.blocker != Literal(lit),
 				"watches[%d]: clause %d uses its own literal as blocker",
 				lit,
-				w.ci,
+				w.cref,
 			)
 			testing.expectf(
 				t,
 				w.binary == (len(c) == 2),
 				"watches[%d]: clause %d has binary=%v but %d literals",
 				lit,
-				w.ci,
+				w.cref,
 				w.binary,
 				len(c),
 			)
 		}
 	}
 
-	for info, ci in s.infos {
-		c := f.clauses[ci]
-		if info.deleted {
+	crefs := arena_clauses(&s)
+	defer delete(crefs)
+	live_learned, deleted_in_arena, wasted := 0, 0, 0
+	for cr in crefs {
+		c := clause_lits(&s, cr)
+		lbd := clause_lbd(&s, cr)
+		if clause_deleted(&s, cr) {
+			deleted_in_arena += 1
+			wasted += HEADER_WORDS + len(c)
 			// only learned, non-glue clauses are ever deleted
 			testing.expectf(
 				t,
-				info.learned && info.lbd > 2,
+				clause_learned(&s, cr) && lbd > 2,
 				"clause %d deleted but learned=%v lbd=%d",
-				ci,
-				info.learned,
-				info.lbd,
+				cr,
+				clause_learned(&s, cr),
+				lbd,
 			)
-			testing.expectf(t, c == nil, "deleted clause %d not freed", ci)
-		} else if info.learned {
+		} else if clause_learned(&s, cr) {
+			live_learned += 1
 			// LBD counts distinct levels: at least 1, at most one per literal
 			testing.expectf(
 				t,
-				1 <= info.lbd && info.lbd <= len(c),
+				1 <= lbd && lbd <= len(c),
 				"clause %d: lbd %d, %d literals",
-				ci,
-				info.lbd,
+				cr,
+				lbd,
 				len(c),
 			)
 		}
+	}
+	// learnts lists exactly the live learned clauses, and wasted is accurate
+	testing.expect_value(t, len(s.learnts), live_learned)
+	for cr in s.learnts {
+		testing.expectf(
+			t,
+			slice.contains(crefs[:], cr),
+			"learnts holds %d, not a clause start",
+			cr,
+		)
+		testing.expectf(
+			t,
+			clause_learned(&s, cr) && !clause_deleted(&s, cr),
+			"learnts holds %d, not live and learned",
+			cr,
+		)
+	}
+	testing.expect_value(t, s.wasted, wasted)
+	// arena_compact ran: some deleted clauses were squeezed out of the arena
+	testing.expectf(
+		t,
+		deleted_in_arena < s.clauses_deleted,
+		"%d deleted clauses still in the arena, %d deleted in total: no compaction",
+		deleted_in_arena,
+		s.clauses_deleted,
+	)
+
+	// every reason of an assigned variable is a live clause that implies it
+	for l in s.trail {
+		cr := s.reasons[lit_var(l)]
+		if cr == NO_REASON {
+			continue
+		}
+		if !testing.expectf(
+			t,
+			slice.contains(crefs[:], cr),
+			"reason %d of %d is not a clause start",
+			cr,
+			l,
+		) {
+			continue
+		}
+		testing.expectf(t, !clause_deleted(&s, cr), "reason %d of %d is deleted", cr, l)
+		testing.expectf(
+			t,
+			clause_lits(&s, cr)[0] == l,
+			"reason %d does not imply %d in slot 0",
+			cr,
+			l,
+		)
 	}
 
 	// collect_victims picks only deletable clauses
 	victims := collect_victims(&s)
 	defer delete(victims)
-	for ci in victims {
-		info := s.infos[ci]
+	for cr in victims {
 		testing.expectf(
 			t,
-			info.learned && !info.deleted && info.lbd > 2 && !locked(&s, ci),
+			clause_learned(&s, cr) &&
+			!clause_deleted(&s, cr) &&
+			clause_lbd(&s, cr) > 2 &&
+			!locked(&s, cr),
 			"victim %d is not deletable",
-			ci,
+			cr,
 		)
 	}
 }
@@ -454,8 +513,8 @@ propagate_binary_blocker_true :: proc(t: ^testing.T) {
 	testing.expect_value(t, propagate(&s), NO_REASON)
 
 	testing.expect_value(t, len(s.trail), 2)
-	testing.expect_value(t, f.clauses[0][0], L(1))
-	testing.expect_value(t, f.clauses[0][1], L(2))
+	testing.expect_value(t, clause_lits(&s, 0)[0], L(1))
+	testing.expect_value(t, clause_lits(&s, 0)[1], L(2))
 }
 
 // A binary clause whose blocker is unassigned implies it, and the reason
@@ -470,9 +529,9 @@ propagate_binary_blocker_unassigned :: proc(t: ^testing.T) {
 	testing.expect_value(t, propagate(&s), NO_REASON)
 
 	testing.expect_value(t, s.values[1], LBool.True)
-	testing.expect_value(t, s.reasons[1], 0)
-	testing.expect_value(t, f.clauses[0][0], L(2))
-	testing.expect_value(t, f.clauses[0][1], L(1))
+	testing.expect_value(t, s.reasons[1], cref_of(&s, 0))
+	testing.expect_value(t, clause_lits(&s, 0)[0], L(2))
+	testing.expect_value(t, clause_lits(&s, 0)[1], L(1))
 	testing.expect(t, locked(&s, 0))
 }
 
@@ -487,7 +546,7 @@ propagate_binary_blocker_false :: proc(t: ^testing.T) {
 	decide(&s, L(-2))
 	decide(&s, L(-1))
 	s.qhead = 1 // x2's own watch list has been handled; x1's has not
-	testing.expect_value(t, propagate(&s), 0)
+	testing.expect_value(t, propagate(&s), cref_of(&s, 0))
 }
 
 // The blocker of a long clause goes stale when the other watch moves. A true
@@ -549,8 +608,8 @@ propagate_refreshes_blocker_when_unit :: proc(t: ^testing.T) {
 	testing.expect_value(t, propagate(&s), NO_REASON)
 
 	testing.expect_value(t, s.values[2], LBool.True)
-	testing.expect_value(t, s.reasons[2], 0)
-	testing.expect_value(t, f.clauses[0][0], L(3))
+	testing.expect_value(t, s.reasons[2], cref_of(&s, 0))
+	testing.expect_value(t, clause_lits(&s, 0)[0], L(3))
 	if testing.expect_value(t, len(s.watches[L(1)]), 1) {
 		testing.expect_value(t, s.watches[L(1)][0].blocker, L(3))
 	}
@@ -561,10 +620,13 @@ propagate_refreshes_blocker_when_unit :: proc(t: ^testing.T) {
 // with one non-false literal is a missed unit; with none, a missed conflict.
 @(private = "file")
 propagation_complete :: proc(s: ^Solver) -> bool {
-	for c, ci in s.formula.clauses {
-		if s.infos[ci].deleted || len(c) < 2 {
+	crefs := arena_clauses(s)
+	defer delete(crefs)
+	for cr in crefs {
+		if clause_deleted(s, cr) {
 			continue
 		}
+		c := clause_lits(s, cr)
 		open := 0
 		for l in c {
 			v := lit_value(s, l)
@@ -740,7 +802,6 @@ minimize_modes_on_example :: proc(t: ^testing.T) {
 		}
 
 		learnt, backjump_level := analyze(&s, confl)
-		defer delete(learnt)
 
 		testing.expectf(t, learnt[0] == L(-5), "case %d: slot 0 is %d, want ¬u", n, learnt[0])
 		testing.expectf(
@@ -810,7 +871,6 @@ minimize_keeps_decisions :: proc(t: ^testing.T) {
 			continue
 		}
 		learnt, _ := analyze(&s, confl)
-		defer delete(learnt)
 
 		testing.expectf(t, len(learnt) == 2, "%v: %d literals, want 2", mode, len(learnt))
 		testing.expectf(
@@ -934,10 +994,17 @@ minimized_clauses_are_implied :: proc(t: ^testing.T) {
 
 			level0_end := s.level_starts[0] if len(s.level_starts) > 0 else len(s.trail)
 			units := s.trail[:level0_end]
-			for ci in n_original ..< len(f.clauses) {
+			// the original clauses, then every learned clause in the order it was learned
+			all: [dynamic][]Literal
+			defer delete(all)
+			append(&all, ..f.clauses[:])
+			for cr in s.learnts {
+				append(&all, clause_lits(&s, cr))
+			}
+			for ci in n_original ..< len(all) {
 				if !testing.expectf(
 					t,
-					rup_implied(int(f.num_vars), f.clauses[:ci], units, f.clauses[ci]),
+					rup_implied(int(f.num_vars), all[:ci], units, all[ci]),
 					"formula %d (%v): learned clause %d is not implied",
 					n,
 					mode,
@@ -977,7 +1044,6 @@ minimize_undoes_failed_check :: proc(t: ^testing.T) {
 		return
 	}
 	learnt, _ := analyze(&s, confl)
-	defer delete(learnt)
 
 	testing.expectf(t, len(learnt) == 5, "%d literals, want 5 (nothing is redundant)", len(learnt))
 	for x in ([]int{-7, -4, -5, -6, -3}) {
